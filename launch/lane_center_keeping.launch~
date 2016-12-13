@@ -1,0 +1,50 @@
+
+<launch>
+   <include file="$(find velodyne_pointcloud)/launch/32e_points.launch">
+  </include>
+  <!--arg name="calibration" default="" /-->
+  
+ <!--node pkg="rviz" name="rviz" type="rviz" args="-d $(find lane_center_keeping)/lane_center_keeping.rviz" required="true"/-->     
+ <node pkg="lane_center_keeping" type="lane_centerline_detection_node" name="lane_centerline_detection_node"  required="true"  output="screen">
+
+    <remap from="points_in" to="/velodyne_points" />
+    <!--remap from="points_in" to="/points_raw" /-->
+    
+    <param name="frame_id" value="/velodyne" />   
+    <param name="min_range" value="2" />
+    <param name="max_range" value="50" />
+    <param name="angular_res" value="10" />
+    <param name="radial_res" value="0.3"/>
+    <param name="ring_angular_res" value="0.2" />
+    <param name="max_height_diff" value="0.25" />
+    <param name="min_height_threshold" value="0.5" />
+    <param name="height_diff" value="1" />
+    <param name="ROAD_WIDTH" value="5"/> 
+    <param name="ANCHOR_POSITION" value="15"/>   
+ </node>
+ 
+   <node pkg="lane_center_keeping" type="center_info_sender" name="center_info_sender"  required="true" output="screen">
+   <param name="KP" type="double" value="28"/>
+   <param name="PID_KP" type="double" value="15"/>
+   <param name="PID_KI" type="double" value="0"/>
+   <param name="PID_KD" type="double" value="5"/>  
+   <param name="BAUD_SPEED" type="double" value="115200" />
+   <param name="SEND_FREQUENZCY" type="int" value="10" />
+   <param name="DRIFT_THRESHOLD" type="double" value="0.5" />  
+    <param name="DEV_ID" type="string" value="/dev/ttyUSB0" />
+ </node> 
+ 
+  <node pkg="lane_center_keeping" type="people_detection_node" name="people_detection_node"  required="true" output="screen">
+   <param name="GRID_DIM" type="int" value="320"/>
+   <param name="M_PER_CELL" type="double" value="0.3"/>
+   <param name="HEIGHT_DIFF_THRESHOLD" type="double" value="0.3"/>
+ </node> 
+ 
+    
+   
+ 
+    
+   
+
+   
+</launch>

@@ -1,0 +1,4191 @@
+/*
+ * lane_centerline_detection.cpp
+ *
+ *  Created on: Sep 28, 2016
+ *      Author: aicrobo
+ */
+
+#include<lane_center_keeping/parameters_list.h>
+
+#include<lane_center_keeping/lane_centerline_detection.h>
+
+#include<pcl/io/pcd_io.h>
+#include<pcl_ros/point_cloud.h>
+#include<pcl_conversions/pcl_conversions.h>
+#include<pcl_ros/transforms.h>
+
+#include<pcl/filters/extract_indices.h>
+#include<pcl/sample_consensus/ransac.h>
+#include<pcl/sample_consensus/sac_model_line.h>
+#include<pcl/segmentation/sac_segmentation.h>
+#include<pcl/sample_consensus/method_types.h>
+#include<pcl/sample_consensus/model_types.h>
+
+#include<std_msgs/Bool.h>
+
+//#include<pcl/segmentation/extract_clusters.h>
+
+//#include<pcl/search/kdtree.h>
+//#include<pcl/segmentation/extract_clusters.h>
+
+//#include<pcl/people/ground_based_people_detection_app.h>
+#include<cmath>
+#include<iomanip>
+
+#include<eigen3/unsupported/Eigen/src/Splines/Spline.h>
+#include<eigen3/unsupported/Eigen/src/Splines/SplineFitting.h>
+
+#include<lane_center_keeping/center_line_msg.h>
+
+
+namespace lane_center_keeping
+{
+  LaneCenterlineDetection::LaneCenterlineDetection(ros::NodeHandle nh,ros::NodeHandle private_nh):
+      nh_(nh), private_nh_(private_nh),road_width_(7.0),min_ring_index_(0),max_ring_index_(31),anchor_position_(10),right_keeping_flag_(false)
+  {
+      private_nh_.param(FRAME_ID_PARAM,params_.frame_id,params_.frame_id);
+      private_nh_.param(MIN_RANGE_PARAM, params_.min_range, params_.min_range);
+      private_nh_.param(MAX_RANGE_PARAM, params_.max_range, params_.max_range);
+      private_nh_.param(ANGULAR_RES_PARAM, params_.angular_res, params_.angular_res);
+      private_nh_.param(RADIAL_RES_PARAM, params_.radial_res, params_.radial_res);
+      private_nh_.param(RING_ANGULAR_RES_PARAM, params_.ring_angular_res, params_.ring_angular_res);
+      private_nh_.param(MAX_HEIGHT_DIFF_PARAM, params_.max_height_diff, params_.max_height_diff);
+
+     // private_nh_.param::get(ROAD_WIDTH,);
+      ros::param::get("~ROAD_WIDTH",road_width_);
+      ros::param::get("~ANCHOR_POSITION",anchor_position_);
+
+      params_.min_range = (params_.min_range <0.0) ?0.0:params_.min_range;
+      params_.max_range = (params_.max_range > 0.0) ? params_.max_range : 0.0;
+      params_.angular_res = (params_.angular_res > 0.01) ? params_.angular_res : 0.01;
+      params_.radial_res = (params_.radial_res > 0.01) ? params_.radial_res : 0.01;
+      params_.ring_angular_res = (params_.ring_angular_res > 0.01) ? params_.ring_angular_res : 0.01;
+      params_.max_height_diff = (params_.max_height_diff > 0.0) ? params_.max_height_diff : 0.0;
+      params_.min_height_threshold = (params_.min_height_threshold > 0.0) ? params_.min_height_threshold : 0.0;
+      params_.height_diff = (params_.height_diff > 0.0) ? params_.height_diff : 0.0;
+
+      ROS_INFO_STREAM(FRAME_ID_PARAM << " parameter: " << params_.frame_id);
+      ROS_INFO_STREAM(MIN_RANGE_PARAM << " parameter: " << params_.min_range);
+      ROS_INFO_STREAM(MAX_RANGE_PARAM << " parameter: " << params_.max_range);
+      ROS_INFO_STREAM(ANGULAR_RES_PARAM << " parameter: " << params_.angular_res);
+      ROS_INFO_STREAM(RADIAL_RES_PARAM << " parameter: " << params_.radial_res);
+      ROS_INFO_STREAM(MAX_HEIGHT_DIFF_PARAM << " parameter: " << params_.max_height_diff);
+
+
+      ground_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("ground_cloud", 1);
+      left_curb_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("left_curb_cloud", 1);
+      right_curb_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("right_curb_cloud", 1);
+
+      clusteredPub_=nh_.advertise<sensor_msgs::PointCloud2>("velodyne_points_clustered",1);
+
+      marker_pub_ = nh_.advertise<visualization_msgs::Marker>("marker", 1, true);
+      curb_info_pub_=nh_.advertise<lane_center_keeping::center_line_msg>("center_line_info",1);
+     // raw_points_sub_ = nh_.subscribe<sensor_msgs::PointCloud2>("points_in", 1, &LaneCenterlineDetection::process_freeway, this);
+      right_keeping_flag_sub_=nh_.subscribe<std_msgs::Bool>("right_keeping_flag_msg",1,&LaneCenterlineDetection::get_right_keeping_flag,this);
+      raw_points_sub_ = nh_.subscribe<sensor_msgs::PointCloud2>("points_in", 1, &LaneCenterlineDetection::process_cityroad, this);
+      //raw_points_sub_ = nh_.subscribe<sensor_msgs::PointCloud2>("points_in", 1, &LaneCenterlineDetection::process_construction_road, this);
+
+
+      lkf = new LaneKalmanFilter(4, 4);
+      lkf->init();
+      first_flag_ = true;
+
+      lkfs=new CurbEdgeKalmanFilter(2,2);
+
+      lkfs->init();
+  }
+
+  void LaneCenterlineDetection::get_right_keeping_flag(const std_msgs::Bool::ConstPtr&flag)
+  {
+    right_keeping_flag_=flag->data;
+    std::cout<<"right_keeping_flag_:"<<right_keeping_flag_<<std::endl;
+    ROS_INFO("right_keeping_flag_:",right_keeping_flag_);
+  }
+
+  bool LaneCenterlineDetection::curbFilter(const VCloud::ConstPtr&cloud_in, TCloud&cloud_out, pcl::ModelCoefficients&coefficients)
+  {
+
+    cloud_out.header.frame_id = cloud_in->header.frame_id;
+    cloud_out.header.stamp = cloud_in->header.stamp;
+    //cloud_out.points.size()=cloud_in->points.size();
+   // std::cout << "cloud_in->points.size:" << cloud_in->points.size() << std::endl;
+    TCloudPtr tpcl(new TCloud());
+
+    pcl::copyPointCloud(*cloud_in, *tpcl);
+    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+    //Create the segmentation object
+    pcl::SACSegmentation<pcl::PointXYZ> seg;
+    seg.setOptimizeCoefficients(true);
+    seg.setModelType(pcl::SACMODEL_LINE);
+    seg.setMethodType(pcl::SAC_RANSAC);
+    seg.setDistanceThreshold(0.1);
+    seg.setMaxIterations(100);
+
+    seg.setInputCloud(tpcl);
+    seg.segment(*inliers, coefficients);
+    if (inliers->indices.size()<10)
+    {
+      PCL_ERROR("Could not estimate a LINE mode for the given dataset");
+      return false;
+    }
+
+    //Create the filtering object
+    pcl::ExtractIndices<pcl::PointXYZ> extract;
+    //Extract the inliers
+    extract.setInputCloud(tpcl);
+    extract.setIndices(inliers);
+    extract.setNegative(false);
+    extract.filter(cloud_out);
+    //cloud_out.points.resize(inliers->indices.size());
+    return true;
+  }
+
+  void LaneCenterlineDetection::line_fit(const TCloud::ConstPtr&cloud, float &a0, float &a1, float&min_z)
+  {
+    double ysum = 0, y2sum = 0, xsum = 0, x2sum = 0, xysum = 0;
+    int num = 0;
+    size_t n = cloud->points.size();
+    min_z = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < n; i++)
+    {
+      float x = cloud->points[i].x;
+      if (x< 20)
+      {
+        float y = cloud->points[i].y;
+        xsum = xsum + x;
+        ysum = ysum + y;
+        y2sum = y2sum + std::pow(y, 2);
+        x2sum = x2sum + std::pow(x, 2);
+        xysum = xysum + x * y;
+        num = num + 1;
+        min_z = std::min(min_z, cloud->points[i].z);
+
+      }
+    }
+    a1 = (num * xysum - ysum * xsum) / (num * x2sum - std::pow(xsum, 2));
+    a0 = (ysum / num) - a1 * (xsum / num);
+    // a=(num*xysum-xsum*ysum)/(num*x2sum-xsum*xsum);
+    //b=(x2sum*ysum-xsum*xysum)/(x2sum*num-xsum*xsum);
+  }
+
+  float LaneCenterlineDetection::median3(const float a, const float b, const float c)
+  {
+    if (a < b)
+    {
+      if (b < c)
+        return b;
+      else if (a < c)
+        return c;
+      else
+        return a;
+    }
+    else
+    {
+      if (a < c)
+        return a;
+      else if (b < c)
+        return c;
+      else
+        return b;
+    }
+  }
+
+void LaneCenterlineDetection::process_construction_road(const sensor_msgs::PointCloud2::ConstPtr&cloud)
+{
+  ROS_INFO_STREAM_ONCE("CurbSegmentation::process_construction_road():Point cloud received");
+  if (right_curb_pub_.getNumSubscribers() == 0)
+   {
+                //return;
+   }
+   pcl::fromROSMsg(*cloud, pcl_in_);
+
+  // Retrieve the input point cloud
+   pcl::PointCloud<VPoint>::Ptr left_curb_cloud(new pcl::PointCloud<VPoint>);
+   pcl::PointCloud<VPoint>::Ptr right_curb_cloud(new pcl::PointCloud<VPoint>);
+   // Copy message header
+   left_curb_cloud->header.stamp = pcl_in_.header.stamp;
+   right_curb_cloud->header.stamp = pcl_in_.header.stamp;
+    // Target TF frame ID
+    if (params_.frame_id.empty())
+    {
+      // No TF transformation required
+      left_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+      right_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+    }
+    else
+    {
+      left_curb_cloud->header.frame_id = params_.frame_id;
+      right_curb_cloud->header.frame_id = params_.frame_id;
+    }
+            /*******************2016-9-20*********median filter*****************************************************************/
+
+    std::vector<std::vector<VPoint*> > rings(32);
+    for (pcl::PointCloud<VPoint>::iterator pt = pcl_in_.points.begin(); pt < pcl_in_.points.end(); pt++)
+    {
+      ROS_ASSERT(pt->ring < 32);
+      rings[pt->ring].push_back(&(*pt));
+    }
+
+    for (std::vector<std::vector<VPoint*> >::iterator ring = rings.begin(); ring < rings.end(); ring++)
+    {
+      if (ring->empty())
+      {
+        continue;
+      }
+      for (std::vector<VPoint*>::iterator pt = ring->begin() + 1; pt < ring->end() - 1; pt++)
+      {
+        VPoint*prev, *succ, *current;
+        prev = *(pt - 1);
+        current = (*pt);
+        succ = *(pt + 1);
+        (*pt)->x = median3(prev->x, (*pt)->x, succ->x);
+        (*pt)->y = median3(prev->y, (*pt)->y, succ->y);
+        (*pt)->z = median3(prev->z, (*pt)->z, succ->z);
+      }
+    }
+
+        //Retrieve the input point cloud
+        // Calculate the number of angular sampling bins
+        num_of_angular_rmap_bins_ = 360 / params_.ring_angular_res;
+        float angular_rmap_res = 360.0f / num_of_angular_rmap_bins_;
+        inv_angular_rmap_res_ = 1.0f / angular_rmap_res;
+
+        // Create and initialize the bins
+        int num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+        ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings);
+        for (size_t i = 0; i < ring_map_.size(); ++i)
+        {
+          ring_map_[i] = RingMapBin();
+        }
+
+        // Accumulate all input points into the polar maps
+        VCloud::iterator itEnd = pcl_in_.end();              //ground_cloud->end();//itEnd=ground_cloud->end();
+        for (VCloud::iterator it = pcl_in_.begin(); it != itEnd; ++it) //it=ground_cloud->begin();it!=itEnd;++it
+        {
+          float x = it->x;
+          float y = it->y;
+          float z = it->z;
+
+          // Conversion to the polar coordinates
+          float ang, mag;
+          toPolarCoords(x, y, ang, mag);
+
+          // RING MAP
+          // Find the corresponding map bin
+          int ah, rh;
+          if (it->ring > max_ring_index_)
+          {
+            max_ring_index_ = it->ring;
+            num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+            ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings, RingMapBin());
+
+            ROS_INFO_STREAM("Ring map resized: " << num_of_rings);
+          }
+          getRingMapIndex(ang, it->ring, ah, rh);
+          // Accumulate the value
+          RingMapBin &hbin = getRingMapBin(ah, rh);
+          Eigen::Vector3d p(x, y, z);
+          float rad = std::sqrt(x * x + y * y);
+          hbin.n += 1;
+          hbin.sum += p;
+          hbin.rad_sum += rad;
+          if (hbin.n == 1)
+          {
+            hbin.rad_min = rad;
+          }
+          else
+          {
+            hbin.rad_min = (rad < hbin.rad_avg) ? rad : hbin.rad_min;
+          }
+        }
+
+        tRingMap::iterator hitEnd = ring_map_.end();
+        for (tRingMap::iterator hit = ring_map_.begin(); hit != hitEnd; ++hit)
+        {
+          if (hit->n < 1)
+          //        if( hit->n < MIN_NUM_OF_SAMPLES )
+          {
+            continue;
+          }
+          // Calculate the average position, ...
+          double inv_n = 1.0 / hit->n;
+          hit->avg = hit->sum * inv_n;
+          hit->rad_avg = hit->rad_sum * inv_n;
+        }
+
+            bool left_detected = false;
+            bool right_detected = false;
+            int previous_position=num_of_angular_rmap_bins_ /2;
+            int current_position = previous_position;
+
+            for (int rh = 2; rh < num_of_rings -12; ++rh)
+            {
+                int left_point_num = 0;
+                int right_point_num = 0;
+               for (int ah = current_position - 5; ah >= 5; ah--)
+               {
+
+                 RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_), rh);
+                  VPoint point;
+                  point.x = hbin.avg[0];
+                  if(point.x<1)
+                  continue;
+                  if(point.x>15)
+                    continue;
+                  point.y = hbin.avg[1];
+                  point.z = hbin.avg[2];
+                  point.ring = rh;
+
+                   RingMapBin&hbin_1_l = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_)+1, rh);
+                   RingMapBin&hbin_2_l = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_)+2, rh);
+                   if(hbin_1_l.n>0&&hbin_2_l.n>0)
+                   {
+                     int temp_count=0;
+                     for (int i = 0; i < 3; i++)
+                     {
+                        RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_)-i, rh);
+                        if(hbin.n<1)
+                        {
+                          continue;
+                        }
+                        float diff_rad_1=hbin_1_l.rad_avg-hbin.rad_avg;
+                        float diff_rad_2=hbin_2_l.rad_avg-hbin.rad_avg;
+                        if(diff_rad_1<0.05||diff_rad_2<0.05)
+                        {
+                           continue;
+                        }
+                        float diff_z_1=hbin.avg[2]-hbin_1_l.avg[2];
+                        float diff_z_2=hbin.avg[2]-hbin_2_l.avg[2];
+                        if(diff_z_1<0||diff_z_2<0)
+                        {
+                          continue;
+                        }
+                        temp_count=temp_count+1;
+
+                      }
+                     if(temp_count==3)
+                     {
+                        right_curb_cloud->points.push_back(point);
+                        right_detected = true;
+                        break;
+                     }
+                   }
+             }
+             for (int ah = current_position - 5; ah < num_of_angular_rmap_bins_; ah++)
+             {
+
+               RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_), rh);
+               VPoint point;
+               point.x = hbin.avg[0];
+               if(point.x<1)
+               continue;
+               if(point.x>10)
+                 continue;
+               point.y = hbin.avg[1];
+               point.z = hbin.avg[2];
+               point.ring = rh;
+
+               RingMapBin&hbin_1_r = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_)-1, rh);
+               RingMapBin&hbin_2_r = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_)-2, rh);
+               if(hbin_1_r.n>0&&hbin_2_r.n>0)
+               {
+                   int temp_count=0;
+                   for (int i = 0; i < 3; i++)
+                   {
+                      RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) +i, rh);
+                      if(hbin.n<1)
+                      {
+                         continue;
+                      }
+                      float diff_rad_1=hbin_1_r.rad_avg-hbin.rad_avg;
+                      float diff_rad_2=hbin_2_r.rad_avg-hbin.rad_avg;
+                      if(diff_rad_1<0.05||diff_rad_2<0.05)
+                      {
+                          continue;
+                      }
+                      float diff_z_1=hbin.avg[2]-hbin_1_r.avg[2];
+                      float diff_z_2=hbin.avg[2]-hbin_2_r.avg[2];
+                      if(diff_z_1<0||diff_z_2<0)
+                      {
+                         continue;
+                      }
+                      temp_count=temp_count+1;
+
+                   }
+                    if (temp_count == 3)
+                    {
+
+                      left_curb_cloud->points.push_back(point);
+                      left_detected = true;
+                      break;
+                    }
+                 }
+             }
+
+            if(left_detected && right_detected)
+            {
+                    VPoint left_point = left_curb_cloud->points[left_curb_cloud->points.size() - 1];
+                    VPoint right_point = right_curb_cloud->points[right_curb_cloud->points.size() - 1];
+                    if ((right_point.y - left_point.y) > 3.5)
+                    {
+                      float center_x = (right_point.x + left_point.x) / 2;
+                      float center_y = (right_point.y + left_point.y) / 2;
+                      float ang, mag;
+                      int row_index, col_index;
+                      toPolarCoords(center_x, center_y, ang, mag);
+                      getPolarMapIndex(ang, mag, row_index, col_index);
+                      current_position = row_index + (row_index - previous_position);
+                      previous_position = row_index;
+                    }
+              }
+            }
+
+/*
+          left_detected = false;
+          right_detected = false;
+          previous_position = num_of_angular_rmap_bins_;
+          current_position = previous_position;
+
+          for (int rh = 5; rh < num_of_rings - 16; ++rh)
+          {
+            int left_point_num = 0;
+            int right_point_num = 0;
+            for (int ah = current_position; ah < (num_of_angular_rmap_bins_ * 3) / 2; ah++)
+            {
+            RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_), rh);
+            VPoint point;
+            point.x = hbin.avg[0];
+            if (point.x > 0)
+              continue;
+            point.y = hbin.avg[1];
+            point.z = hbin.avg[2];
+            point.ring = rh;
+
+            RingMapBin&hbin_1_l = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) - 1, rh);
+            RingMapBin&hbin_2_l = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) - 2, rh);
+            if (hbin_1_l.n > 0 && hbin_2_l.n > 0)
+            {
+              int temp_count = 0;
+              for (int i = 0; i < 6; i++)
+              {
+                RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) + i, rh);
+                if (hbin.n < 1)
+                {
+                  continue;
+                }
+                float diff_rad_1 = hbin_1_l.rad_avg - hbin.rad_avg;
+                float diff_rad_2 = hbin_2_l.rad_avg - hbin.rad_avg;
+                if (diff_rad_1 < 0.05 || diff_rad_2 < 0.05)
+                {
+                  continue;
+                }
+                float diff_z_1 = hbin.avg[2] - hbin_1_l.avg[2];
+                float diff_z_2 = hbin.avg[2] - hbin_2_l.avg[2];
+                if (diff_z_1 < 0 || diff_z_2 < 0)
+                {
+                  continue;
+                }
+                temp_count = temp_count + 1;
+
+              }
+              if (temp_count == 6)
+              {
+                right_curb_cloud->points.push_back(point);
+                right_detected = true;
+                break;
+              }
+            }
+           }
+
+          for(int ah = current_position; ah > num_of_angular_rmap_bins_ / 2; ah--)
+          {
+
+            RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_), rh);
+            VPoint point;
+            point.x = hbin.avg[0];
+            if(point.x>0)
+            continue;
+            point.y = hbin.avg[1];
+            point.z = hbin.avg[2];
+            point.ring = rh;
+
+            RingMapBin&hbin_1_r = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_)+1, rh);
+            RingMapBin&hbin_2_r = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_)+2, rh);
+            if(hbin_1_r.n>0&&hbin_2_r.n>0)
+            {
+                int temp_count=0;
+                for (int i = 0; i < 6; i++)
+                {
+                   RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) -i, rh);
+                   if(hbin.n<1)
+                   {
+                      continue;
+                   }
+                   float diff_rad_1=hbin_1_r.rad_avg-hbin.rad_avg;
+                   float diff_rad_2=hbin_2_r.rad_avg-hbin.rad_avg;
+                   if(diff_rad_1<0.05||diff_rad_2<0.05)
+                   {
+                       continue;
+                   }
+                   float diff_z_1=hbin.avg[2]-hbin_1_r.avg[2];
+                   float diff_z_2=hbin.avg[2]-hbin_2_r.avg[2];
+                   if(diff_z_1<0||diff_z_2<0)
+                   {
+                      continue;
+                   }
+                   temp_count=temp_count+1;
+
+                }
+                 if (temp_count == 6)
+                 {
+
+                   left_curb_cloud->points.push_back(point);
+                   left_detected = true;
+                   break;
+                 }
+              }
+          }
+            if (left_detected && right_detected)
+            {
+              VPoint left_point = left_curb_cloud->points[left_curb_cloud->points.size() -1];
+              VPoint right_point = right_curb_cloud->points[right_curb_cloud->points.size() - 1];
+              if (std::abs(right_point.y - left_point.y) > 3.5)
+              {
+                float center_x = (right_point.x + left_point.x) / 2;
+                float center_y = (right_point.y + left_point.y) / 2;
+                float ang, mag;
+                int row_index, col_index;
+                toPolarCoords(center_x, center_y, ang, mag);
+                getPolarMapIndex(ang, mag, row_index, col_index);
+                current_position = row_index + (row_index - previous_position);
+                previous_position = row_index;
+              }
+            }
+         }
+*/
+
+          /*******************2016-9-20*********curb feature points detection***************************************************************************/
+          /******************2016-9-21*line fit***************************************************************************/
+/*
+            size_t num_left_cloud = left_curb_cloud->points.size();
+            size_t num_right_cloud = right_curb_cloud->points.size();
+
+            bool left_curb_exit = false;
+            bool right_curb_exit = false;
+
+            TCloudPtr cloud_left_p(new TCloud());
+            TCloudPtr cloud_right_p(new TCloud());
+
+            pcl::ModelCoefficients coefficients_right;
+            pcl::ModelCoefficients coefficients_left;
+
+            TCloudPtr tpcl(new TCloud());
+            pcl::copyPointCloud(*left_curb_cloud, *tpcl);
+            pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+
+            float left_line_a0, left_line_a1, left_min_z;
+            float right_line_a0, right_line_a1, right_min_z;
+            Eigen::Vector3f left_curve_coefficient;
+            Eigen::Vector3f right_curve_coefficient;
+            left_curb_exit = curbFilter(left_curb_cloud, *cloud_left_p, coefficients_left);
+            right_curb_exit = curbFilter(right_curb_cloud, *cloud_right_p, coefficients_right);
+            if (left_curb_exit)
+              {
+                line_fit(cloud_left_p, left_line_a0, left_line_a1, left_min_z);
+                //  left_line_a1=coefficients_left.values[4]/coefficients_left.values[3];
+                //  left_line_a0=coefficients_left.values[1]-left_line_a1*coefficients_left.values[0];
+              }
+              else
+              {
+                left_line_a0 = 0;
+                left_line_a1 = 0;
+              }
+
+              if (right_curb_exit)
+              {
+                line_fit(cloud_right_p, right_line_a0, right_line_a1, right_min_z);
+                // right_line_a1=coefficients_right.values[4]/coefficients_right.values[3];
+                // right_line_a0=coefficients_right.values[1]-right_line_a1*coefficients_right.values[0];
+              }
+              else
+              {
+                right_line_a0 = 0;
+                right_line_a1 = 0;
+              }
+
+*/
+          /*************************************************************************************/
+/*
+
+                marker.ns = "local_left_curb_marker";
+                marker.header.frame_id = cloud->header.frame_id;
+                marker.header.stamp = ros::Time();
+                marker.type = visualization_msgs::Marker::LINE_STRIP;
+                marker.action = visualization_msgs::Marker::ADD;
+                marker.scale.x = 0.05;
+                marker.color.a = 1.0;
+                marker.color.r = 1;
+                marker.color.g = 0;
+                marker.color.b = 0;
+                marker.frame_locked = true;
+                marker.points.clear();
+                marker.id = 0;
+                for (int i = -50; i < 100; i++)
+                {
+                  geometry_msgs::Point point;
+                  point.x = 0.2 * i;
+                  point.y = (left_line_a0 + left_line_a1 * point.x);
+                  // point.y=left_curve_coefficient[0]*std::pow(point.x,2)+left_curve_coefficient[1]*point.x+left_curve_coefficient[2];
+                  // point.z = coefficients_left.values[2];
+
+                  point.z = left_min_z;
+                  marker.points.push_back(point);
+                }
+                marker_pub_.publish(marker);
+
+                  marker.ns = "local_right_curb_marker";
+                  marker.header.frame_id = cloud->header.frame_id;
+                  marker.header.stamp = ros::Time();
+                  marker.type = visualization_msgs::Marker::LINE_STRIP;
+                  marker.action = visualization_msgs::Marker::ADD;
+                  marker.scale.x = 0.05;
+                  marker.color.a = 1.0;
+                  marker.color.r = 0;
+                  marker.color.g = 0;
+                  marker.color.b = 1;
+                  marker.frame_locked = true;
+                  marker.points.clear();
+                  marker.id = 1;
+
+                  for (int i = -50; i < 100; i++)
+                  {
+                    geometry_msgs::Point point;
+                    point.x = 0.2 * i;
+                    point.y = (right_line_a0 + right_line_a1 * point.x);
+                    //point.y=right_curve_coefficient[0]*std::pow(point.x,2)+right_curve_coefficient[1]*point.x+right_curve_coefficient[2];
+                    //point.z =coefficients_right.values[2] ;
+                    point.z = right_min_z;
+                    marker.points.push_back(point);
+                  }
+                  marker_pub_.publish(marker);
+
+
+*/
+
+                sensor_msgs::PointCloud2::Ptr left_cloud_out(new sensor_msgs::PointCloud2);
+                sensor_msgs::PointCloud2::Ptr right_cloud_out(new sensor_msgs::PointCloud2);
+               // sensor_msgs::PointCloud2::Ptr ground_cloud_out(new sensor_msgs::PointCloud2);
+                pcl::toROSMsg(*left_curb_cloud, *left_cloud_out);
+                pcl::toROSMsg(*right_curb_cloud, *right_cloud_out); //cloud_right_p
+
+
+                left_cloud_out->header.frame_id = cloud->header.frame_id;
+                left_cloud_out->header.stamp = cloud->header.stamp;
+
+                right_cloud_out->header.frame_id = cloud->header.frame_id;
+                right_cloud_out->header.stamp = cloud->header.stamp;
+
+                left_curb_pub_.publish(left_cloud_out);
+                right_curb_pub_.publish(right_cloud_out);
+}
+
+  void LaneCenterlineDetection::process(const sensor_msgs::PointCloud2::ConstPtr&cloud)
+  {
+    ROS_INFO_STREAM_ONCE("CurbSegmentation::process():Point cloud received");
+    if (right_curb_pub_.getNumSubscribers() == 0)
+    {
+       return;
+    }
+
+    pcl::fromROSMsg(*cloud, pcl_in_);
+
+    // Retrieve the input point cloud
+    pcl::PointCloud<VPoint>::Ptr left_curb_cloud(new pcl::PointCloud<VPoint>);
+    pcl::PointCloud<VPoint>::Ptr right_curb_cloud(new pcl::PointCloud<VPoint>);
+    // Copy message header
+    left_curb_cloud->header.stamp=pcl_in_.header.stamp;
+    right_curb_cloud->header.stamp=pcl_in_.header.stamp;
+    // Target TF frame ID
+    if (params_.frame_id.empty())
+    {
+      // No TF transformation required
+      left_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+      right_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+    }
+    else
+    {
+      left_curb_cloud->header.frame_id = params_.frame_id;
+      right_curb_cloud->header.frame_id =params_.frame_id;
+    }
+    /*******************2016-9-20*********median filter*****************************************************************/
+    std::vector<std::vector<VPoint*> > rings(32);
+    for (pcl::PointCloud<VPoint>::iterator pt = pcl_in_.points.begin(); pt < pcl_in_.points.end(); pt++)
+    {
+      ROS_ASSERT(pt->ring < 32);
+      rings[pt->ring].push_back(&(*pt));
+    }
+
+    for (std::vector<std::vector<VPoint*> >::iterator ring = rings.begin(); ring < rings.end()-10; ring++)
+    {
+      if (ring->empty())
+      {
+        continue;
+      }
+      for (std::vector<VPoint*>::iterator pt = ring->begin() + 1; pt < ring->end() - 1; pt++)
+      {
+        VPoint*prev, *succ, *current;
+        prev = *(pt - 1);
+        current = (*pt);
+        succ = *(pt + 1);
+        (*pt)->x = median3(prev->x, (*pt)->x, succ->x);
+        (*pt)->y = median3(prev->y, (*pt)->y, succ->y);
+        (*pt)->z = median3(prev->z, (*pt)->z, succ->z);
+      }
+    }
+    /*******************2016-9-20*********median filter********************************************************/
+
+    //Retrieve the input point cloud
+    VCloud::Ptr ground_cloud(new VCloud);
+/*
+    // Calculate the number of angular sampling bins
+    num_of_angular_bins_ = int(360 / params_.angular_res);
+    float angular_res = 360.0f / num_of_angular_bins_;
+    inv_angular_res_ = 1.0f / angular_res;
+
+    // Calculate the number of sampling bins along the polar axis
+    num_of_radial_bins_ = int(params_.max_range / params_.radial_res);
+    float radial_res = float(params_.max_range / num_of_radial_bins_);
+    inv_radial_res_ = 1.0f / radial_res;
+
+    // Create and initialize the map sampling bins
+    polar_map_.resize(num_of_angular_bins_ * num_of_radial_bins_);
+    polar_height_map_.resize(num_of_angular_bins_ * num_of_radial_bins_);
+
+    for (size_t i = 0; i < polar_map_.size(); ++i)
+    {
+      polar_map_[i] = PolarMapBin();
+    }
+
+    for (size_t i = 0; i < pcl_in_.points.size(); i++)
+    {
+
+      float x = pcl_in_.points[i].x;
+      float y = pcl_in_.points[i].y;
+      float z = pcl_in_.points[i].z;
+
+      float ang, mag;
+      toPolarCoords(x, y, ang, mag);
+      // Check the distance
+      if (mag > params_.max_range)
+        continue;
+      if (params_.min_range > 0.0 && mag < params_.min_range)
+        continue;
+
+      // Find the corresponding map bin
+      int an, rn;
+      getPolarMapIndex(ang, mag, an, rn);
+      size_t polar_map_index = rn * num_of_angular_bins_ + an;
+      polar_height_map_[polar_map_index].push_back(z);
+      // Accumulate the value
+      PolarMapBin &bin = getPolarMapBin(an, rn);
+      bin.n = bin.n + 1;
+      if (bin.n == 1)
+      {
+        bin.min_x = pcl_in_.points[i].x;
+        bin.min_y = pcl_in_.points[i].y;
+        bin.min_z = pcl_in_.points[i].z;
+
+        bin.max_x = pcl_in_.points[i].x;
+        bin.max_y = pcl_in_.points[i].y;
+        bin.max_z = pcl_in_.points[i].z;
+
+      }
+      else
+      {
+        bin.min_x = std::min(pcl_in_.points[i].x, bin.min_x);
+        bin.min_y = std::min(pcl_in_.points[i].y, bin.min_y);
+        bin.min_z = std::min(pcl_in_.points[i].z, bin.min_z);
+        bin.max_x = std::max(pcl_in_.points[i].x, bin.max_x);
+        bin.max_y = std::max(pcl_in_.points[i].y, bin.max_y);
+        bin.max_z = std::max(pcl_in_.points[i].z, bin.max_z);
+      }
+    }
+
+    for (size_t i = 0; i < polar_map_.size(); i++)
+    {
+      std::vector<float> temp = polar_height_map_[i];
+      if (polar_map_[i].min_z > params_.min_height_threshold)
+      {
+        continue;
+      }
+      else
+      {
+        std::sort(temp.begin(), temp.end());
+        for (size_t index = 1; index < temp.size(); index++)
+        {
+          float height_diff = temp[index] - temp[index - 1];
+          if (height_diff < params_.height_diff && (index != temp.size() - 1))
+          {
+            continue;
+          }
+          else if (height_diff < params_.height_diff && (index == temp.size() - 1))
+          {
+            polar_map_[i].vertice_z = temp[index];
+            break;
+          }
+          else if (height_diff > params_.height_diff)
+          {
+            polar_map_[i].vertice_z = temp[index - 1];
+            break;
+          }
+        }
+
+      }
+    }
+    polar_height_map_.clear();
+
+    for (size_t i = 0; i < pcl_in_.points.size(); i++)
+    {
+
+      float x = pcl_in_.points[i].x;
+      float y = pcl_in_.points[i].y;
+      float z = pcl_in_.points[i].z;
+
+      float ang, mag;
+      toPolarCoords(x, y, ang, mag);
+      // Check the distance
+      if (mag > params_.max_range)
+        continue;
+      if (params_.min_range > 0.0 && mag < params_.min_range)
+        continue;
+      // Find the corresponding map bin
+      int an, rn;
+      getPolarMapIndex(ang, mag, an, rn);
+      // Accumulate the value
+      PolarMapBin &bin = getPolarMapBin(an, rn);
+      if (bin.n < 2)
+        continue;
+      if (bin.vertice_z != std::numeric_limits<float>::max())
+      {
+        float relative_diff = bin.vertice_z - bin.min_z;
+        if (z < bin.vertice_z)             //z<bin.vertice_z&&relative_diff<0.3
+        {
+          ground_cloud->points.push_back(pcl_in_.points[i]);
+        }
+      }
+    }
+*/
+
+    // Calculate the number of angular sampling bins
+    num_of_angular_rmap_bins_ = 360 / params_.ring_angular_res;
+    float angular_rmap_res = 360.0f / num_of_angular_rmap_bins_;
+    inv_angular_rmap_res_ = 1.0f / angular_rmap_res;
+
+    // Create and initialize the bins
+    int num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+    ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings);
+    for (size_t i = 0; i < ring_map_.size(); ++i)
+    {
+      ring_map_[i] = RingMapBin();
+    }
+
+    // Accumulate all input points into the polar maps
+    VCloud::iterator itEnd = pcl_in_.end();//ground_cloud->end();//itEnd=ground_cloud->end();
+    for (VCloud::iterator it = pcl_in_.begin(); it != itEnd; ++it) //it=ground_cloud->begin();it!=itEnd;++it
+    {
+      float x = it->x;
+      float y = it->y;
+      float z = it->z;
+      // Conversion to the polar coordinates
+      float ang, mag;
+      toPolarCoords(x, y, ang, mag);
+
+      // RING MAP
+      // Find the corresponding map bin
+      int ah, rh;
+      if (it->ring > max_ring_index_)
+      {
+        max_ring_index_ = it->ring;
+        num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+        ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings, RingMapBin());
+      }
+      getRingMapIndex(ang, it->ring, ah, rh);
+      // Accumulate the value
+      RingMapBin &hbin = getRingMapBin(ah, rh);
+      Eigen::Vector3d p(x, y, z);
+      float rad = std::sqrt(x * x + y * y);
+      hbin.n += 1;
+      hbin.sum += p;
+      hbin.rad_sum += rad;
+      if (hbin.n == 1)
+      {
+        hbin.rad_min = rad;
+      }
+      else
+      {
+        hbin.rad_min = (rad < hbin.rad_avg) ? rad : hbin.rad_min;
+      }
+    }
+
+    tRingMap::iterator hitEnd = ring_map_.end();
+    for (tRingMap::iterator hit = ring_map_.begin(); hit != hitEnd; ++hit)
+    {
+      if (hit->n < 1)
+      //        if( hit->n < MIN_NUM_OF_SAMPLES )
+      {
+        continue;
+      }
+
+      // Calculate the average position, ...
+      double inv_n = 1.0 / hit->n;
+      hit->avg = hit->sum * inv_n;
+      hit->rad_avg = hit->rad_sum * inv_n;
+    }
+
+    /************************************************************************************************/
+
+    bool left_detected = false;
+    bool right_detected = false;
+    int previous_position=num_of_angular_rmap_bins_ /2;
+    int current_position = previous_position;
+
+    for (int rh = 1; rh < num_of_rings -11; ++rh)
+    {
+      int left_point_num = 0;
+      int right_point_num = 0;
+
+      for (int ah = current_position - 2; ah >= 2; ah--)
+      {
+        double max_rad = std::numeric_limits<float>::min();
+        double min_rad = std::numeric_limits<float>::max();
+        double max_z = std::numeric_limits<float>::min();
+        double min_z = std::numeric_limits<float>::max();
+
+        for (int i = 0; i < 5; i++)
+        {
+          RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_-i) % num_of_angular_rmap_bins_), rh);
+          if (hbin.n > 0)
+          {
+            max_rad = std::max(max_rad, hbin.rad_avg);
+            min_rad = std::min(min_rad, hbin.rad_avg);
+            max_z = std::max(max_z, hbin.avg[2]);
+            min_z = std::min(min_z, hbin.avg[2]);
+          }
+        }
+        if ((max_z - min_z) > 0.15 && (max_rad - min_rad > 0.1) && (max_rad - min_rad < 0.3))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+        {
+          RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_), rh);
+          VPoint point;
+          point.x = hbin.avg[0];
+          point.y = hbin.avg[1];
+          point.z = hbin.avg[2];
+          point.ring = rh;
+          right_curb_cloud->points.push_back(point);
+          right_point_num = right_point_num + 1;
+          right_detected = true;
+        }
+        if (right_point_num > 3)
+        {
+          break;
+        }
+      }
+
+      for (int ah = (current_position + 3); ah <= num_of_angular_rmap_bins_ - 4; ah++)
+      {
+        double max_rad = std::numeric_limits<float>::min();
+        double min_rad = std::numeric_limits<float>::max();
+        double max_z = std::numeric_limits<float>::min();
+        double min_z = std::numeric_limits<float>::max();
+
+        for (int i = 0; i < 5; i++)
+        {
+          RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_+i) % num_of_angular_rmap_bins_), rh);
+          if (hbin.n > 0)
+          {
+            max_rad = std::max(max_rad, hbin.rad_avg);
+            min_rad = std::min(min_rad, hbin.rad_avg);
+            max_z = std::max(max_z, hbin.avg[2]);
+            min_z = std::min(min_z, hbin.avg[2]);
+          }
+        }
+        if ((max_z - min_z) > 0.15 && (max_rad - min_rad > 0.1) && (max_rad - min_rad < 0.4))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+        {
+          RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_)%num_of_angular_rmap_bins_), rh);
+          VPoint point;
+          point.x = hbin.avg[0];
+          point.y = hbin.avg[1];
+          point.z = hbin.avg[2];
+          point.ring = rh;
+        //  right_curb_cloud->points.push_back(point);
+          left_point_num = left_point_num + 1;
+          left_detected = true;
+        }
+        if (left_point_num > 3)
+        {
+          break;
+        }
+      }
+
+      if (left_detected && right_detected)
+      {
+        VPoint left_point = left_curb_cloud->points[left_curb_cloud->points.size() - 1];
+        VPoint right_point =right_curb_cloud->points[right_curb_cloud->points.size() - 1];
+        if (std::abs(right_point.y- left_point.y)>3.5)
+        {
+          float center_x = (right_point.x + left_point.x) / 2;
+          float center_y = (right_point.y + left_point.y) / 2;
+          float ang, mag;
+          int row_index, col_index;
+          toPolarCoords(center_x, center_y, ang, mag);
+          getPolarMapIndex(ang, mag, row_index, col_index);
+          current_position = row_index + (row_index - previous_position);
+          previous_position = row_index;
+        }
+
+      }
+
+    }
+    /*******************2016-9-20*********curb feature points detection***************************************************************************/
+    /******************2016-9-21*line fit***************************************************************************/
+
+    /*
+    size_t num_left_cloud = left_curb_cloud->points.size();
+    size_t num_right_cloud = right_curb_cloud->points.size();
+
+    bool left_curb_exit = false;
+    bool right_curb_exit = false;
+
+    TCloudPtr cloud_left_p(new TCloud());
+    TCloudPtr cloud_right_p(new TCloud());
+
+    pcl::ModelCoefficients coefficients_right;
+    pcl::ModelCoefficients coefficients_left;
+
+    float left_line_a0, left_line_a1, left_min_z;
+    float right_line_a0, right_line_a1, right_min_z;
+    Eigen::Vector3f left_curve_coefficient;
+    Eigen::Vector3f right_curve_coefficient;
+    left_curb_exit=curbFilter(left_curb_cloud, *cloud_left_p, coefficients_left);
+    right_curb_exit=curbFilter(right_curb_cloud, *cloud_right_p, coefficients_right);
+    if(left_curb_exit)
+    {
+        left_line_a1=coefficients_left.values[4]/coefficients_left.values[3];
+        left_line_a0=coefficients_left.values[1]-left_line_a1*coefficients_left.values[0];
+     }
+     else
+     {
+        left_line_a0 = 0;
+        left_line_a1 = 0;
+     }
+     if (right_curb_exit)
+     {
+         right_line_a1=coefficients_right.values[4]/coefficients_right.values[3];
+         right_line_a0=coefficients_right.values[1]-right_line_a1*coefficients_right.values[0];
+     }
+     else
+     {
+        right_line_a0 = 0;
+        right_line_a1 = 0;
+     }
+     */
+  /*************************************************************************************/
+
+    /*
+    marker.ns = "local_left_curb_marker";
+       marker.header.frame_id = cloud->header.frame_id;
+       marker.header.stamp = ros::Time();
+       marker.type = visualization_msgs::Marker::LINE_STRIP;
+       marker.action = visualization_msgs::Marker::ADD;
+       marker.scale.x = 0.05;
+       marker.color.a = 1.0;
+       marker.color.r = 1;
+       marker.color.g = 0;
+       marker.color.b = 0;
+       marker.frame_locked = true;
+       marker.points.clear();
+       marker.id = 1;
+       for (int i = -50; i < 100; i++)
+       {
+         geometry_msgs::Point point;
+         point.x = 0.2 * i;
+         point.y = (left_line_a0 + left_line_a1 * point.x);
+         point.z = coefficients_left.values[2];
+         marker.points.push_back(point);
+       }
+       marker_pub__.publish(marker);
+
+      marker.ns = "local_right_curb_marker";
+      marker.header.frame_id = cloud->header.frame_id;
+      marker.header.stamp = ros::Time();
+      marker.type = visualization_msgs::Marker::LINE_STRIP;
+      marker.action = visualization_msgs::Marker::ADD;
+      marker.scale.x = 0.05;
+      marker.color.a = 1.0;
+      marker.color.r = 0;
+      marker.color.g = 0;
+      marker.color.b = 1;
+      marker.frame_locked = true;
+      marker.points.clear();
+      marker.id = 2;
+
+      for (int i = -50; i < 100; i++)
+      {
+        geometry_msgs::Point point;
+        point.x = 0.2 * i;
+        point.y = (right_line_a0 + right_line_a1 * point.x);
+        point.z =coefficients_right.values[2] ;
+        marker.points.push_back(point);
+      }
+      marker_pub__.publish(marker);
+
+/******************2016-9-21 line fit******************************************************************************/
+/*********************2016-9-23 kalman tracking*********************************************************************************************/
+/*
+       Point2f left_p1, left_p2;
+        left_p1.x = -5;
+        left_p1.y = (left_line_a0 + left_line_a1 * left_p1.x);
+        left_p2.x = 15;
+        left_p2.y = (left_line_a0 + left_line_a1 * left_p2.x);
+        Point2f right_p1, right_p2;
+        right_p1.x = -5;
+        right_p1.y = (right_line_a0 + right_line_a1 * right_p1.x);
+        right_p2.x = 15;
+        right_p2.y= (right_line_a0 + right_line_a1 * right_p2.x);
+        vector<Point2f> lLane, rLane, lSLane, rSlane;
+
+        if (first_flag_)
+        {
+          first_flag_ = false;
+          lkf->setStateLaneL(left_p1, left_p2);
+          lkf->setStateLaneR(right_p1, right_p2);
+          lkf->next();
+         lSLane = lkf->getStateL();
+         rSlane = lkf->getStateR();
+        }
+        else
+        {
+          lkf->addLine(left_p1, left_p2,true);
+          lkf->addLine(right_p1, right_p2, false);
+          lkf->predict();
+          lSLane = lkf->getStateL();
+          rSlane = lkf->getStateR();
+        }
+
+
+    size_t left_size=cloud_left_p->points.size();
+    size_t right_size=cloud_right_p->points.size();
+    vector<float>center_parameters(2);
+    if(left_size>2*right_size)
+     {
+       center_parameters[1]=(lSLane[0].y-lSLane[1].y)/(lSLane[0].x-lSLane[1].x);
+       center_parameters[0]=lSLane[0].y-center_parameters[1]*lSLane[0].x+road_width__/2;
+     }
+     else if(right_size>2*left_size)
+     {
+       center_parameters[1]=(rSlane[0].y-lSLane[1].y)/(rSlane[0].x-rSlane[1].x);
+       center_parameters[0]=rSlane[0].y-center_parameters[1]*rSlane[0].x-road_width__/2;
+     }
+    else
+     {
+      float y1=(lSLane[0].y+rSlane[0].y)/2;
+      float y2=(lSLane[1].y+rSlane[1].y)/2;
+      float x1=-5;
+      float x2=15;
+      center_parameters[1]=(y1-y2)/(x1-x2);
+      center_parameters[0]=y1-center_parameters[1]*x1;
+      road_width__=std::abs(lSLane[0].y-rSlane[0].y);
+     }
+
+         marker.ns = "kalman_left__marker";
+         marker.header.frame_id = cloud->header.frame_id;
+         marker.header.stamp = ros::Time();
+         marker.type = visualization_msgs::Marker::LINE_STRIP;
+         marker.action = visualization_msgs::Marker::ADD;
+         marker.scale.x = 0.05;
+         marker.color.a = 1.0;
+         marker.color.r = 0;
+         marker.color.g = 1;
+         marker.color.b = 0;
+         marker.frame_locked = true;
+         marker.points.clear();
+         marker.id = 3;
+         for (int i = 0; i < 2; i++)
+         {
+           geometry_msgs::Point point;
+           point.y = lSLane[i].y;
+           point.x = lSLane[i].x;
+           point.z =  coefficients_left.values[2];
+           std::cout << "update data2:" << point.x << lSLane[i].y << std::endl;
+           marker.points.push_back(point);
+         }
+         marker_pub__.publish(marker);
+
+         marker.ns = "kalman_right__marker";
+         marker.header.frame_id = cloud->header.frame_id;
+         marker.header.stamp = ros::Time();
+         marker.type = visualization_msgs::Marker::LINE_STRIP;
+         marker.action = visualization_msgs::Marker::ADD;
+         marker.scale.x = 0.05;
+         marker.color.a = 1.0;
+         marker.color.r = 0;
+         marker.color.g = 1;
+         marker.color.b = 0;
+         marker.frame_locked = true;
+         marker.points.clear();
+         marker.id = 4;
+         for (int i = 0; i < 2; i++)
+         {
+           geometry_msgs::Point point;
+           point.y = rSlane[i].y;
+           point.x = rSlane[i].x;
+           point.z = coefficients_right.values[2];
+           marker.points.push_back(point);
+         }
+         marker_pub__.publish(marker);
+
+         marker.ns = "kalman_center__marker";
+         marker.header.frame_id = cloud->header.frame_id;
+         marker.header.stamp = ros::Time();
+         marker.type = visualization_msgs::Marker::LINE_STRIP;
+         marker.action = visualization_msgs::Marker::ADD;
+         marker.scale.x = 0.05;
+         marker.color.a = 1.0;
+         marker.color.r = 1;
+         marker.color.g = 0;
+         marker.color.b = 0;
+         marker.frame_locked = true;
+         marker.points.clear();
+         marker.id = 5;
+         for (int i = 0; i < 2; i++)
+         {
+           geometry_msgs::Point point;
+           point.x = rSlane[i].x;
+           point.y=center_parameters[1]*point.x+center_parameters[0];
+           //point.y = (rSlane[i].y + lSLane[i].y) / 2;
+           point.z = coefficients_left.values[2];
+           marker.points.push_back(point);
+         }
+         marker_pub__.publish(marker);
+*/
+  /**********************2016-9-23 kalman tracking************************************************************************************/
+
+    /*****************************************************************************************************************/
+        sensor_msgs::PointCloud2::Ptr left_cloud_out(new sensor_msgs::PointCloud2);
+        sensor_msgs::PointCloud2::Ptr right_cloud_out(new sensor_msgs::PointCloud2);
+        sensor_msgs::PointCloud2::Ptr ground_cloud_out(new sensor_msgs::PointCloud2);
+        pcl::toROSMsg(*left_curb_cloud, *left_cloud_out);
+        pcl::toROSMsg(*right_curb_cloud, *right_cloud_out); //cloud_right_p
+        pcl::toROSMsg(*ground_cloud, *ground_cloud_out); //cloud_right_p
+
+       // left_cloud_out->header.frame_id = cloud->header.frame_id;
+        //left_cloud_out->header.stamp = cloud->header.stamp;
+
+        //right_cloud_out->header.frame_id = cloud->header.frame_id;
+        //right_cloud_out->header.stamp = cloud->header.stamp;
+
+        ground_cloud_out->header.frame_id = cloud->header.frame_id;
+        ground_cloud_out->header.stamp = cloud->header.stamp;
+        //    ROS_INFO_STREAM("ground_points_count: " << ground_cloud->points.size())
+        left_curb_pub_.publish(left_cloud_out);
+        right_curb_pub_.publish(right_cloud_out);
+        ground_pub_.publish(ground_cloud_out);
+
+      //
+        center_line_msg::Ptr center_line_msgPtr(new center_line_msg());
+       // center_line_msgPtr->header.frame_id=cloud->header.frame_id;
+       // center_line_msgPtr->header.stamp=ros::Time::now();
+      //  center_line_msgPtr->slope=center_parameters[1];
+       // center_line_msgPtr->intercept=-(center_parameters[0]+center_parameters[1]*15);
+
+      //  curb_info_pub_.publish(center_line_msgPtr);
+        //ROS_INFO("%f", center_line_msgPtr->intercept);
+
+  }
+
+  void LaneCenterlineDetection::process2(const sensor_msgs::PointCloud2::ConstPtr&cloud)
+  {
+    ROS_INFO_STREAM_ONCE("CurbSegmentation::process2():Point cloud received");
+    if (right_curb_pub_.getNumSubscribers() == 0)
+    {
+       //   return;
+    }
+       pcl::fromROSMsg(*cloud, pcl_in_);
+
+    // Retrieve the input point cloud
+       pcl::PointCloud<VPoint>::Ptr left_curb_cloud(new pcl::PointCloud<VPoint>);
+       pcl::PointCloud<VPoint>::Ptr right_curb_cloud(new pcl::PointCloud<VPoint>);
+       // Copy message header
+       left_curb_cloud->header.stamp=pcl_in_.header.stamp;
+       right_curb_cloud->header.stamp=pcl_in_.header.stamp;
+       // Target TF frame ID
+       if (params_.frame_id.empty())
+       {
+         // No TF transformation required
+         left_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+         right_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+       }
+       else
+       {
+         left_curb_cloud->header.frame_id = params_.frame_id;
+         right_curb_cloud->header.frame_id =params_.frame_id;
+       }
+    /*******************2016-9-20*********median filter*****************************************************************/
+    std::vector<std::vector<VPoint*> > rings(32);
+    for (pcl::PointCloud<VPoint>::iterator pt = pcl_in_.points.begin(); pt < pcl_in_.points.end(); pt++)
+    {
+      ROS_ASSERT(pt->ring < 32);
+      rings[pt->ring].push_back(&(*pt));
+    }
+
+    for (std::vector<std::vector<VPoint*> >::iterator ring = rings.begin(); ring < rings.end(); ring++)
+    {
+      if (ring->empty())
+      {
+        continue;
+      }
+      for (std::vector<VPoint*>::iterator pt = ring->begin() + 1; pt < ring->end() - 1; pt++)
+      {
+        VPoint*prev, *succ, *current;
+        prev = *(pt - 1);
+        current = (*pt);
+        succ = *(pt + 1);
+        (*pt)->x = median3(prev->x, (*pt)->x, succ->x);
+        (*pt)->y = median3(prev->y, (*pt)->y, succ->y);
+        (*pt)->z = median3(prev->z, (*pt)->z, succ->z);
+      }
+    }
+    /*******************2016-9-20*********median filter********************************************************/
+
+    /*******************2016-9-20*********curb feature points detection***************************************************************************/
+    /*
+     size_t cloud_num=pcl_in_.points.size();
+     for(size_t i=0;i<cloud_num;i++)
+     {
+     float x=pcl_in_.points[i].x;
+     float y=pcl_in_.points[i].y;
+     float z=pcl_in_.points[i].z;
+
+     pcl_in_.points[i].x=1.0009*x-0.0353*y-0.3*z-0.3933;
+     pcl_in_.points[i].y=0.0339*x+0.4161*y+4.1681*z+4.5226;
+     pcl_in_.points[i].z=0.0196*x-0.0723*y+0.9276*z+1.8099;
+     }
+     */
+    /**********************************************************************************/
+    //Retrieve the input point cloud
+    // Calculate the number of angular sampling bins
+    num_of_angular_rmap_bins_ = 360 / params_.ring_angular_res;
+    float angular_rmap_res = 360.0f / num_of_angular_rmap_bins_;
+    inv_angular_rmap_res_ = 1.0f / angular_rmap_res;
+
+    // Create and initialize the bins
+    int num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+    ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings);
+    for (size_t i = 0; i < ring_map_.size(); ++i)
+    {
+      ring_map_[i] = RingMapBin();
+    }
+
+    // Accumulate all input points into the polar maps
+    VCloud::iterator itEnd = pcl_in_.end();//ground_cloud->end();//itEnd=ground_cloud->end();
+    for (VCloud::iterator it = pcl_in_.begin(); it != itEnd; ++it) //it=ground_cloud->begin();it!=itEnd;++it
+    {
+      float x = it->x;
+      float y = it->y;
+      float z = it->z;
+
+      // Conversion to the polar coordinates
+      float ang, mag;
+      toPolarCoords(x, y, ang, mag);
+
+      // RING MAP
+      // Find the corresponding map bin
+      int ah, rh;
+      if (it->ring > max_ring_index_)
+      {
+        max_ring_index_ = it->ring;
+        num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+        ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings, RingMapBin());
+
+        ROS_INFO_STREAM("Ring map resized: " << num_of_rings);
+      }
+      getRingMapIndex(ang, it->ring, ah, rh);
+      // Accumulate the value
+      RingMapBin &hbin = getRingMapBin(ah, rh);
+      Eigen::Vector3d p(x, y, z);
+      float rad = std::sqrt(x * x + y * y);
+      hbin.n += 1;
+      hbin.sum += p;
+      hbin.rad_sum += rad;
+      if (hbin.n == 1)
+      {
+        hbin.rad_min = rad;
+      }
+      else
+      {
+        hbin.rad_min = (rad < hbin.rad_avg) ? rad : hbin.rad_min;
+      }
+    }
+
+    tRingMap::iterator hitEnd = ring_map_.end();
+    for (tRingMap::iterator hit = ring_map_.begin(); hit != hitEnd; ++hit)
+    {
+      if (hit->n < 1)
+      //        if( hit->n < MIN_NUM_OF_SAMPLES )
+      {
+        continue;
+      }
+      // Calculate the average position, ...
+      double inv_n = 1.0 / hit->n;
+      hit->avg = hit->sum * inv_n;
+      hit->rad_avg = hit->rad_sum * inv_n;
+    }
+
+
+    /************************************************************************************************/
+    ///// RING MAP
+
+    bool left_detected = false;
+    bool right_detected = false;
+    int previous_position=num_of_angular_rmap_bins_ /2;
+    int current_position = previous_position;
+
+    for (int rh = 1; rh < num_of_rings -11; ++rh)
+    {
+      int left_point_num = 0;
+      int right_point_num = 0;
+
+      for (int ah = current_position - 2; ah >= 2; ah--)
+      {
+        double max_rad = std::numeric_limits<float>::min();
+        double min_rad = std::numeric_limits<float>::max();
+        double max_z = std::numeric_limits<float>::min();
+        double min_z = std::numeric_limits<float>::max();
+
+        for (int i = 0; i < 3; i++)
+        {
+          RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) - i, rh);
+          if (hbin.n > 0)
+          {
+            max_rad = std::max(max_rad, hbin.rad_avg);
+            min_rad = std::min(min_rad, hbin.rad_avg);
+            max_z = std::max(max_z, hbin.avg[2]);
+            min_z = std::min(min_z, hbin.avg[2]);
+          }
+        }
+        if ((max_z - min_z) > 0.15 && (max_rad - min_rad > 0.05) && (max_rad - min_rad < 0.3))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+        {
+          RingMapBin&hbin = getRingMapBin(ah, rh);
+          VPoint point;
+          point.x = hbin.avg[0];
+          point.y = hbin.avg[1];
+          point.z = hbin.avg[2];
+          point.ring = rh;
+          right_curb_cloud->points.push_back(point);
+          right_point_num =right_point_num + 1;
+          right_detected = true;
+        }
+        if (right_point_num > 3)
+        {
+          break;
+        }
+      }
+
+      for(int ah=current_position-2;ah<num_of_angular_rmap_bins_;ah++)
+      {
+        double max_rad = std::numeric_limits<float>::min();
+        double min_rad = std::numeric_limits<float>::max();
+        double max_z = std::numeric_limits<float>::min();
+        double min_z = std::numeric_limits<float>::max();
+
+        for (int i = 0; i < 3; i++)
+        {
+          RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) + i, rh);
+          if (hbin.n > 0)
+          {
+            max_rad = std::max(max_rad, hbin.rad_avg);
+            min_rad = std::min(min_rad, hbin.rad_avg);
+            max_z = std::max(max_z, hbin.avg[2]);
+            min_z = std::min(min_z, hbin.avg[2]);
+          }
+        }
+        if ((max_z - min_z) > 0.15 && (max_rad - min_rad > 0.1) && (max_rad - min_rad < 0.4))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+        {
+          RingMapBin&hbin = getRingMapBin(ah, rh);
+          VPoint point;
+          point.x = hbin.avg[0];
+          point.y = hbin.avg[1];
+          point.z = hbin.avg[2];
+          point.ring = rh;
+          left_curb_cloud->points.push_back(point);
+          left_point_num = left_point_num + 1;
+          left_detected = true;
+        }
+        if (left_point_num > 3)
+        {
+          break;
+        }
+      }
+
+      if (left_detected && right_detected)
+      {
+        VPoint left_point = left_curb_cloud->points[left_curb_cloud->points.size() - 1];
+        VPoint right_point = right_curb_cloud->points[right_curb_cloud->points.size() - 1];
+        if ((right_point.y- left_point.y)>3.5)
+        {
+          float center_x = (right_point.x + left_point.x) / 2;
+          float center_y = (right_point.y + left_point.y) / 2;
+          float ang, mag;
+          int row_index, col_index;
+          toPolarCoords(center_x, center_y, ang, mag);
+          getPolarMapIndex(ang, mag, row_index, col_index);
+          current_position = row_index + (row_index - previous_position);
+          previous_position = row_index;
+        }
+
+      }
+
+    }
+
+    /*******************2016-9-20*********curb feature points detection***************************************************************************/
+    /******************2016-9-21*line fit***************************************************************************/
+
+    size_t num_left_cloud = left_curb_cloud->points.size();
+    size_t num_right_cloud = right_curb_cloud->points.size();
+
+    bool left_curb_exit = false;
+    bool right_curb_exit = false;
+
+    TCloudPtr cloud_left_p(new TCloud());
+    TCloudPtr cloud_right_p(new TCloud());
+
+
+    pcl::ModelCoefficients coefficients_right;
+    pcl::ModelCoefficients coefficients_left;
+
+      TCloudPtr tpcl(new TCloud());
+      pcl::copyPointCloud(*left_curb_cloud, *tpcl);
+      pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+
+      float left_line_a0, left_line_a1, left_min_z;
+      float right_line_a0, right_line_a1, right_min_z;
+      Eigen::Vector3f left_curve_coefficient;
+      Eigen::Vector3f right_curve_coefficient;
+      left_curb_exit=curbFilter(left_curb_cloud, *cloud_left_p, coefficients_left);
+      right_curb_exit=curbFilter(right_curb_cloud, *cloud_right_p, coefficients_right);
+      if(left_curb_exit)
+      {
+          left_line_a1=coefficients_left.values[4]/coefficients_left.values[3];
+          left_line_a0=coefficients_left.values[1]-left_line_a1*coefficients_left.values[0];
+      }
+      else
+      {
+          left_line_a0 = 0;
+          left_line_a1 = 0;
+       }
+       if(right_curb_exit)
+       {
+         right_line_a1=coefficients_right.values[4]/coefficients_right.values[3];
+         right_line_a0=coefficients_right.values[1]-right_line_a1*coefficients_right.values[0];
+       }
+       else
+       {
+         right_line_a0 = 0;
+         right_line_a1 = 0;
+       }
+
+  /*************************************************************************************/
+
+       marker.ns = "local_left_curb_marker";
+       marker.header.frame_id = cloud->header.frame_id;
+       marker.header.stamp = ros::Time();
+       marker.type = visualization_msgs::Marker::LINE_STRIP;
+       marker.action = visualization_msgs::Marker::ADD;
+       marker.scale.x = 0.05;
+       marker.color.a = 1.0;
+       marker.color.r = 1;
+       marker.color.g = 0;
+       marker.color.b = 0;
+       marker.frame_locked = true;
+       marker.points.clear();
+       marker.id = 0;
+       for (int i = -50; i < 100; i++)
+       {
+         geometry_msgs::Point point;
+         point.x = 0.2 * i;
+         point.y = (left_line_a0 + left_line_a1 * point.x);
+        // point.y=left_curve_coefficient[0]*std::pow(point.x,2)+left_curve_coefficient[1]*point.x+left_curve_coefficient[2];
+         point.z = coefficients_left.values[2];
+         marker.points.push_back(point);
+       }
+       marker_pub_.publish(marker);
+
+      marker.ns = "local_right_curb_marker";
+      marker.header.frame_id = cloud->header.frame_id;
+      marker.header.stamp = ros::Time();
+      marker.type = visualization_msgs::Marker::LINE_STRIP;
+      marker.action = visualization_msgs::Marker::ADD;
+      marker.scale.x = 0.05;
+      marker.color.a = 1.0;
+      marker.color.r = 0;
+      marker.color.g = 0;
+      marker.color.b = 1;
+      marker.frame_locked = true;
+      marker.points.clear();
+      marker.id = 1;
+
+      for (int i = -50; i < 100; i++)
+      {
+        geometry_msgs::Point point;
+        point.x = 0.2 * i;
+        point.y = (right_line_a0 + right_line_a1 * point.x);
+        //point.y=right_curve_coefficient[0]*std::pow(point.x,2)+right_curve_coefficient[1]*point.x+right_curve_coefficient[2];
+        point.z =coefficients_right.values[2] ;
+        marker.points.push_back(point);
+      }
+      marker_pub_.publish(marker);
+
+
+    /******************2016-9-21 line fit******************************************************************************/
+  /*********************2016-9-23 kalman tracking*********************************************************************************************/
+
+        Point2f left_p1, left_p2;
+        left_p1.x = -5;
+        left_p1.y = (left_line_a0 + left_line_a1 * left_p1.x);
+        left_p2.x = 15;
+        left_p2.y = (left_line_a0 + left_line_a1 * left_p2.x);
+        Point2f right_p1, right_p2;
+        right_p1.x = -5;
+        right_p1.y = (right_line_a0 + right_line_a1 * right_p1.x);
+        right_p2.x = 15;
+        right_p2.y= (right_line_a0 + right_line_a1 * right_p2.x);
+        vector<Point2f> lLane, rLane, lSLane, rSlane;
+        if (first_flag_)
+        {
+          first_flag_ = false;
+          lkf->setStateLaneL(left_p1, left_p2);
+          lkf->setStateLaneR(right_p1, right_p2);
+          lkf->next();
+         lSLane = lkf->getStateL();
+         rSlane = lkf->getStateR();
+        }
+        else
+        {
+         lkf->addLine(left_p1, left_p2,true);
+         lkf->addLine(right_p1, right_p2, false);
+        //  lkf->setMeas(left_p1,left_p2,true);
+          lkf->predict();
+        //  lkf->update(true);
+          lSLane = lkf->getStateL();
+
+         // lkf->setMeas(right_p1, right_p2, false);
+         // lkf->predict();
+         // lkf->update(false);
+          rSlane = lkf->getStateR();
+        }
+
+  /*************************************************************************************/
+
+    size_t left_size=cloud_left_p->points.size();
+    size_t right_size=cloud_right_p->points.size();
+    vector<float>center_parameters(2);
+
+
+    if(left_size>2*right_size)
+     {
+       center_parameters[1]=(lSLane[0].y-lSLane[1].y)/(lSLane[0].x-lSLane[1].x);
+       center_parameters[0]=lSLane[0].y-center_parameters[1]*lSLane[0].x-road_width_/2;
+     }
+     else if(right_size>2*left_size)
+     {
+       center_parameters[1]=(rSlane[0].y-lSLane[1].y)/(rSlane[0].x-rSlane[1].x);
+       center_parameters[0]=rSlane[0].y-center_parameters[1]*rSlane[0].x+road_width_/2;
+     }
+    else
+     {
+      float y1=(lSLane[0].y+rSlane[0].y)/2;
+      float y2=(lSLane[1].y+rSlane[1].y)/2;
+      float x1=-5;
+      float x2=15;
+      center_parameters[1]=(y1-y2)/(x1-x2);
+      center_parameters[0]=y1-center_parameters[1]*x1;
+      road_width_=std::abs(lSLane[0].y-rSlane[0].y);
+     }
+
+         marker.ns = "kalman_left__marker";
+         marker.header.frame_id = cloud->header.frame_id;
+         marker.header.stamp = ros::Time();
+         marker.type = visualization_msgs::Marker::LINE_STRIP;
+         marker.action = visualization_msgs::Marker::ADD;
+         marker.scale.x = 0.05;
+         marker.color.a = 1.0;
+         marker.color.r = 0;
+         marker.color.g = 1;
+         marker.color.b = 0;
+         marker.frame_locked = true;
+         marker.points.clear();
+         marker.id = 3;
+         for (int i = 0; i < 2; i++)
+         {
+           geometry_msgs::Point point;
+           point.y = lSLane[i].y;
+           point.x = lSLane[i].x;
+           point.z =  coefficients_left.values[2];
+           std::cout << "update data2:" << point.x << lSLane[i].y << std::endl;
+           marker.points.push_back(point);
+         }
+         marker_pub_.publish(marker);
+
+         marker.ns = "kalman_right__marker";
+         marker.header.frame_id = cloud->header.frame_id;
+         marker.header.stamp = ros::Time();
+         marker.type = visualization_msgs::Marker::LINE_STRIP;
+         marker.action = visualization_msgs::Marker::ADD;
+         marker.scale.x = 0.05;
+         marker.color.a = 1.0;
+         marker.color.r = 0;
+         marker.color.g = 1;
+         marker.color.b = 0;
+         marker.frame_locked = true;
+         marker.points.clear();
+         marker.id = 4;
+         for (int i = 0; i < 2; i++)
+         {
+           geometry_msgs::Point point;
+           point.y = rSlane[i].y;
+           point.x = rSlane[i].x;
+           point.z = coefficients_right.values[2];
+           marker.points.push_back(point);
+         }
+         marker_pub_.publish(marker);
+
+         marker.ns = "kalman_center__marker";
+         marker.header.frame_id = cloud->header.frame_id;
+         marker.header.stamp = ros::Time();
+         marker.type = visualization_msgs::Marker::LINE_STRIP;
+         marker.action = visualization_msgs::Marker::ADD;
+         marker.scale.x = 0.05;
+         marker.color.a = 1.0;
+         marker.color.r = 1;
+         marker.color.g = 0;
+         marker.color.b = 0;
+         marker.frame_locked = true;
+         marker.points.clear();
+         marker.id = 5;
+         for (int i = 0; i < 2; i++)
+         {
+           geometry_msgs::Point point;
+           point.x = rSlane[i].x;
+          // point.y=center_parameters[1]*point.x+center_parameters[0];
+           point.y = (rSlane[i].y + lSLane[i].y) / 2;
+           point.z = coefficients_left.values[2];
+           marker.points.push_back(point);
+         }
+         marker_pub_.publish(marker);
+
+  /**********************2016-9-23 kalman tracking************************************************************************************/
+
+
+    /*****************************************************************************************************************/
+
+        sensor_msgs::PointCloud2::Ptr left_cloud_out(new sensor_msgs::PointCloud2);
+        sensor_msgs::PointCloud2::Ptr right_cloud_out(new sensor_msgs::PointCloud2);
+        sensor_msgs::PointCloud2::Ptr ground_cloud_out(new sensor_msgs::PointCloud2);
+        pcl::toROSMsg(*left_curb_cloud, *left_cloud_out);
+        pcl::toROSMsg(*right_curb_cloud, *right_cloud_out); //cloud_right_p
+      //  pcl::toROSMsg(*ground_cloud, *ground_cloud_out); //cloud_right_p
+
+        left_cloud_out->header.frame_id = cloud->header.frame_id;
+        left_cloud_out->header.stamp = cloud->header.stamp;
+
+        right_cloud_out->header.frame_id = cloud->header.frame_id;
+        right_cloud_out->header.stamp = cloud->header.stamp;
+
+       // ground_cloud_out->header.frame_id = cloud->header.frame_id;
+        //ground_cloud_out->header.stamp = cloud->header.stamp;
+        //    ROS_INFO_STREAM("ground_points_count: " << ground_cloud->points.size())
+        left_curb_pub_.publish(left_cloud_out);
+        right_curb_pub_.publish(right_cloud_out);
+      //  ground_pub_.publish(ground_cloud_out);
+/*
+        curb_detection::CenterLine::Ptr center_line_infoPtr(new curb_detection::CenterLine);
+        center_line_infoPtr->header.stamp=ros::Time::now();
+        center_line_infoPtr->slope=center_parameters[1];
+        center_line_infoPtr->intercept=-(center_parameters[1]*15+center_parameters[0]);
+        curb_info_pub_.publish(center_line_infoPtr);
+        */
+
+  }
+
+   void LaneCenterlineDetection::process_freeway(const sensor_msgs::PointCloud2::ConstPtr&cloud)
+  {
+     ROS_INFO_STREAM_ONCE("CurbSegmentation::process_freeway():Point cloud received");
+     if (right_curb_pub_.getNumSubscribers() == 0)
+     {
+           //   return;
+      }
+           pcl::fromROSMsg(*cloud, pcl_in_);
+
+        // Retrieve the input point cloud
+           pcl::PointCloud<VPoint>::Ptr left_curb_cloud(new pcl::PointCloud<VPoint>);
+           pcl::PointCloud<VPoint>::Ptr right_curb_cloud(new pcl::PointCloud<VPoint>);
+
+           // Copy message header
+           left_curb_cloud->header.stamp=pcl_in_.header.stamp;
+           right_curb_cloud->header.stamp=pcl_in_.header.stamp;
+
+           // Target TF frame ID
+           if (params_.frame_id.empty())
+           {
+             // No TF transformation required
+             left_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+             right_curb_cloud->header.frame_id=pcl_in_.header.frame_id;
+
+           }
+           else
+           {
+             left_curb_cloud->header.frame_id = params_.frame_id;
+             right_curb_cloud->header.frame_id=params_.frame_id;
+           }
+  /***********************************passthrough filter 2016-10-9***********************************************************/
+/*
+       pcl::PointCloud<VPoint>::Ptr passthrough_filter(new pcl::PointCloud<VPoint>);
+       pcl::PointCloud<VPoint> passthrough_cloud;
+       passthrough_cloud.header.frame_id=pcl_in_.header.frame_id;
+       passthrough_cloud.header.stamp=pcl_in_.header.stamp;
+       passthrough_cloud.resize(pcl_in_.size());
+       int count_cloud=0;
+       for(size_t i=0;i<pcl_in_.points.size();i++)
+       {
+         float x=pcl_in_.points[i].x;
+         float y=pcl_in_.points[i].y;
+         float ang, mag;
+         toPolarCoords(x, y, ang, mag);
+         // Check the distance
+         if (mag > params_.max_range)
+         continue;
+         else if(params_.min_range > 0.0 && mag < params_.min_range)
+         continue;
+         else
+         {
+           passthrough_cloud.points.push_back(pcl_in_.points[i]);
+           count_cloud=count_cloud+1;
+         }
+       }
+       passthrough_cloud.resize(count_cloud);
+
+*/
+  /***********************************passthrough*filter 2016-10-9********************************************************/
+
+        /*******************2016-9-20*********median filter*****************************************************************/
+        std::vector<std::vector<VPoint*> > rings(32);
+        for (pcl::PointCloud<VPoint>::iterator pt = pcl_in_.points.begin(); pt < pcl_in_.points.end(); pt++)
+        {
+          ROS_ASSERT(pt->ring < 32);
+          rings[pt->ring].push_back(&(*pt));
+        }
+
+        for (std::vector<std::vector<VPoint*> >::iterator ring = rings.begin(); ring < rings.end(); ring++)
+        {
+          if (ring->empty())
+          {
+            continue;
+          }
+          for (std::vector<VPoint*>::iterator pt = ring->begin() + 1; pt < ring->end() - 1; pt++)
+          {
+            VPoint*prev, *succ, *current;
+            prev = *(pt - 1);
+            current = (*pt);
+            succ = *(pt + 1);
+            (*pt)->x = median3(prev->x, (*pt)->x, succ->x);
+            (*pt)->y = median3(prev->y, (*pt)->y, succ->y);
+            (*pt)->z = median3(prev->z, (*pt)->z, succ->z);
+          }
+        }
+        /*******************2016-9-20*********median filter********************************************************/
+
+        /*******************2016-9-20*********curb feature points detection***************************************************************************/
+/*
+         size_t cloud_num=pcl_in_.points.size();
+         for(size_t i=0;i<cloud_num;i++)
+         {
+         float x=pcl_in_.points[i].x;
+         float y=pcl_in_.points[i].y;
+         float z=pcl_in_.points[i].z;
+
+         pcl_in_.points[i].x=1.0009*x-0.0353*y-0.3*z-0.3933;
+         pcl_in_.points[i].y=0.0339*x+0.4161*y+4.1681*z+4.5226;
+         pcl_in_.points[i].z=0.0196*x-0.0723*y+0.9276*z+1.8099;
+         }
+         */
+        /**********************************************************************************/
+        /*************************10-4***************************************************/
+
+        //Retrieve the input point cloud
+        // Calculate the number of angular sampling bins
+        num_of_angular_rmap_bins_ = 360 / params_.ring_angular_res;
+        float angular_rmap_res = 360.0f / num_of_angular_rmap_bins_;
+        inv_angular_rmap_res_ = 1.0f / angular_rmap_res;
+
+        // Create and initialize the bins
+        int num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+        ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings);
+        for (size_t i = 0; i < ring_map_.size(); ++i)
+        {
+          ring_map_[i] = RingMapBin();
+        }
+
+        // Accumulate all input points into the polar maps
+        VCloud::iterator itEnd = pcl_in_.end();//ground_cloud->end();//itEnd=ground_cloud->end();
+        for (VCloud::iterator it = pcl_in_.begin(); it != itEnd; ++it) //it=ground_cloud->begin();it!=itEnd;++it
+        {
+          float x = it->x;
+          float y = it->y;
+          float z = it->z;
+
+          // Conversion to the polar coordinates
+          float ang, mag;
+          toPolarCoords(x, y, ang, mag);
+
+          // RING MAP
+          // Find the corresponding map bin
+          int ah, rh;
+          if (it->ring > max_ring_index_)
+          {
+            max_ring_index_ = it->ring;
+            num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+            ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings, RingMapBin());
+          }
+          getRingMapIndex(ang, it->ring, ah, rh);
+          // Accumulate the value
+          RingMapBin &hbin = getRingMapBin(ah, rh);
+          Eigen::Vector3d p(x, y, z);
+          float rad = std::sqrt(x * x + y * y);
+          hbin.n += 1;
+          hbin.sum += p;
+          hbin.rad_sum += rad;
+          if (hbin.n == 1)
+          {
+            hbin.rad_min = rad;
+          }
+          else
+          {
+            hbin.rad_min = (rad < hbin.rad_avg) ? rad : hbin.rad_min;
+          }
+        }
+
+        tRingMap::iterator hitEnd = ring_map_.end();
+        for (tRingMap::iterator hit = ring_map_.begin(); hit != hitEnd; ++hit)
+        {
+          if (hit->n < 1)
+          //        if( hit->n < MIN_NUM_OF_SAMPLES )
+          {
+            continue;
+          }
+          // Calculate the average position, ...
+          double inv_n = 1.0 / hit->n;
+          hit->avg = hit->sum * inv_n;
+          hit->rad_avg = hit->rad_sum * inv_n;
+        }
+
+
+        /************************************************************************************************/
+        ///// RING MAP
+
+/*******************************************************************/
+     bool left_detected = false;
+     bool right_detected=false;
+
+     int previous_position=num_of_angular_rmap_bins_ /2;
+     int current_position = previous_position;
+
+     for (int rh = 3; rh < num_of_rings -12; ++rh)
+     {
+         int left_point_num = 0;
+
+         int right_point_num=0;
+
+        for (int ah = current_position - 2; ah < num_of_angular_rmap_bins_; ah++)
+        {
+
+          double max_rad = std::numeric_limits<float>::min();
+          double min_rad = std::numeric_limits<float>::max();
+          double max_z = std::numeric_limits<float>::min();
+          double min_z = std::numeric_limits<float>::max();
+
+          for (int i = 0; i < 5; i++)
+          {
+            RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) + i, rh);
+            if (hbin.n > 0)
+            {
+              max_rad = std::max(max_rad, hbin.rad_avg);
+              min_rad = std::min(min_rad, hbin.rad_avg);
+              max_z = std::max(max_z, hbin.avg[2]);
+              min_z = std::min(min_z, hbin.avg[2]);
+            }
+          }
+          if ((max_z - min_z) > 0.1 && (max_rad - min_rad > 0.1) && (max_rad - min_rad < 0.4))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+          {
+            RingMapBin&hbin = getRingMapBin(ah, rh);
+            VPoint point;
+            point.x = hbin.avg[0];
+            point.y = hbin.avg[1];
+            point.z = hbin.avg[2];
+            point.ring = rh;
+            if(std::abs(point.x)>2&&std::abs(point.y)>1.5)
+            {
+            left_curb_cloud->points.push_back(point);
+            left_point_num = left_point_num + 1;
+            left_detected = true;
+            }
+          }
+          if (left_point_num > 4)
+          {
+            left_point_num = 0;
+            break;
+          }
+        }
+
+        for (int ah = current_position - 5; ah >= 5; ah--)
+           {
+               double max_rad = std::numeric_limits<float>::min();
+               double min_rad = std::numeric_limits<float>::max();
+               double max_z = std::numeric_limits<float>::min();
+               double min_z = std::numeric_limits<float>::max();
+
+               for (int i = 0; i < 4; i++)
+               {
+                  RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) - i, rh);
+                  if (hbin.n > 0)
+                  {
+                     max_rad = std::max(max_rad, hbin.rad_avg);
+                     min_rad = std::min(min_rad, hbin.rad_avg);
+                     max_z = std::max(max_z, hbin.avg[2]);
+                     min_z = std::min(min_z, hbin.avg[2]);
+                  }
+               }
+               if ((max_z - min_z) > 0.15&&(max_rad - min_rad > 0.05) && (max_rad - min_rad < 0.3)) //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+               {
+                   RingMapBin&hbin = getRingMapBin(ah, rh);
+                   VPoint point;
+                   point.x = hbin.avg[0];
+                   point.y = hbin.avg[1];
+                   point.z = hbin.avg[2];
+                   point.ring = rh;
+                   if(std::abs(point.x)>2&&std::abs(point.y)>1.5)
+                   {
+
+                   right_curb_cloud->points.push_back(point);
+                   right_point_num = right_point_num + 1;
+                   right_detected = true;
+                   }
+                }
+                if (right_point_num > 5)
+                {
+                    break;
+                }
+             }
+
+     }
+
+
+         left_detected = false;
+         right_detected = false;
+         previous_position=num_of_angular_rmap_bins_ ;
+         current_position = previous_position;
+
+
+      for (int rh = 3; rh < num_of_rings -16; ++rh)
+      {
+            int left_point_num = 0;
+            int right_point_num=0;
+        // for (int ah = current_position - 2; ah < num_of_angular_rmap_bins_; ah++)
+        for (int ah = num_of_angular_rmap_bins_; ah > current_position; ah--)
+        {
+
+          double max_rad = std::numeric_limits<float>::min();
+          double min_rad = std::numeric_limits<float>::max();
+          double max_z = std::numeric_limits<float>::min();
+          double min_z = std::numeric_limits<float>::max();
+
+          for (int i = 0; i < 5; i++)
+          {
+            RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) - i, rh);
+            if (hbin.n > 0)
+            {
+              max_rad = std::max(max_rad, hbin.rad_avg);
+              min_rad = std::min(min_rad, hbin.rad_avg);
+              max_z = std::max(max_z, hbin.avg[2]);
+              min_z = std::min(min_z, hbin.avg[2]);
+            }
+          }
+          if ((max_z - min_z) > 0.15 && (max_rad - min_rad > 0.1) && (max_rad - min_rad < 0.4))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+          {
+            RingMapBin&hbin = getRingMapBin(ah, rh);
+            VPoint point;
+            point.x = hbin.avg[0];
+            point.y = hbin.avg[1];
+            point.z = hbin.avg[2];
+            point.ring = rh;
+            if(std::abs(point.x)>2&&std::abs(point.y)>1.5)
+            {
+             left_curb_cloud->points.push_back(point);
+             left_point_num = left_point_num + 1;
+             left_detected = true;
+            }
+
+          }
+          if (left_point_num > 4)
+          {
+            left_point_num = 0;
+            break;
+          }
+        }
+           for (int ah=current_position;ah<(num_of_angular_rmap_bins_*3)/2;ah++)
+           {
+             double max_rad = std::numeric_limits<float>::min();
+             double min_rad = std::numeric_limits<float>::max();
+             double max_z = std::numeric_limits<float>::min();
+             double min_z = std::numeric_limits<float>::max();
+
+             for (int i = 0; i < 4; i++)
+             {
+               RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) + i, rh);
+               if (hbin.n > 0)
+               {
+                 max_rad = std::max(max_rad, hbin.rad_avg);
+                 min_rad = std::min(min_rad, hbin.rad_avg);
+                 max_z = std::max(max_z, hbin.avg[2]);
+                 min_z = std::min(min_z, hbin.avg[2]);
+               }
+             }
+             if ((max_z - min_z) > 0.15&& (max_rad - min_rad > 0.1) && (max_rad - min_rad < 0.3))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+             {
+               RingMapBin&hbin = getRingMapBin(ah, rh);
+               VPoint point;
+               point.x = hbin.avg[0];
+               point.y = hbin.avg[1];
+               point.z = hbin.avg[2];
+               point.ring = rh;
+               if(std::abs(point.x)>2&&std::abs(point.y)>2)
+               {
+               right_curb_cloud->points.push_back(point);
+               right_point_num = right_point_num + 1;
+               right_detected = true;
+               }
+             }
+             if (right_point_num > 5)
+             {
+               break;
+             }
+           }
+     }
+
+
+
+/********************************erfenwei**********************************/
+/*
+     size_t num_left_cloud = left_curb_cloud->points.size();
+     std::vector<int> histogram_y;
+     std::vector<int>histogram_sum;
+     histogram_y.resize(200);
+     histogram_sum.resize(200);
+
+     for(int i=0;i<200;i++)
+     {
+       histogram_y[i]=0;
+       histogram_sum[i]=0;
+     }
+    float resolution_histogram=0.1;
+    for(int i=0;i<num_left_cloud;i++)
+    {
+      int index=200+int(left_curb_cloud->points[i].y/resolution_histogram);
+      histogram_y[index]=histogram_y[index]+1;
+    }
+    histogram_sum[0]=histogram_y[0];
+    for(int i=1;i<200;i++)
+    {
+      histogram_sum[i]=histogram_sum[i-1]+histogram_y[i];
+    }
+
+
+*/
+
+ /*** *************************erfenwei*******************************/
+
+
+        size_t num_left_cloud = left_curb_cloud->points.size();
+        size_t num_right_cloud=right_curb_cloud->points.size();
+        bool left_curb_exit = false;
+        bool right_curb_exit= false;
+
+        TCloudPtr cloud_left_p(new TCloud());
+        TCloudPtr cloud_right_p(new TCloud());
+
+        pcl::ModelCoefficients coefficients_left;
+        pcl::ModelCoefficients coefficients_right;
+/*
+        TCloudPtr tpcl(new TCloud());
+        pcl::copyPointCloud(*left_curb_cloud, *tpcl);
+        pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+        */
+
+        float left_line_a0, left_line_a1, left_min_z;
+
+        Eigen::Vector3f left_curve_coefficient;
+
+        left_curb_exit=curbFilter(left_curb_cloud, *cloud_left_p, coefficients_left);
+
+        if (left_curb_exit)
+        {
+          line_fit(cloud_left_p, left_line_a0, left_line_a1, left_min_z);
+          //  left_line_a1=coefficients_left.values[4]/coefficients_left.values[3];
+          //  left_line_a0=coefficients_left.values[1]-left_line_a1*coefficients_left.values[0];
+        }
+        else
+        {
+          left_line_a0 = 0;
+          left_line_a1 = 0;
+        }
+
+        float right_line_a0,right_line_a1,right_min_z;
+        Eigen::Vector3f right_curve_coefficient;
+        right_curb_exit=curbFilter(right_curb_cloud,*cloud_right_p,coefficients_right);
+
+        if(right_curb_exit)
+        {
+          line_fit(cloud_right_p,right_line_a0,right_line_a1,right_min_z);
+        }
+        else
+        {
+          right_line_a0=0;
+          right_line_a1=0;
+        }
+
+
+/*************************************************************************************/
+
+          marker.ns = "local_left_curb_marker";
+          marker.header.frame_id = cloud->header.frame_id;
+          marker.header.stamp = ros::Time();
+          marker.type = visualization_msgs::Marker::LINE_STRIP;
+          marker.action = visualization_msgs::Marker::ADD;
+          marker.scale.x = 0.05;
+          marker.color.a = 1.0;
+          marker.color.r = 0;
+          marker.color.g = 1;
+          marker.color.b = 0;
+          marker.frame_locked = true;
+          marker.points.clear();
+          marker.id = 0;
+          for (int i = -50; i < 75; i++)
+          {
+            geometry_msgs::Point point;
+            point.x = 0.2 * i;
+            point.y = (left_line_a0 + left_line_a1 * point.x);
+            // point.y=left_curve_coefficient[0]*std::pow(point.x,2)+left_curve_coefficient[1]*point.x+left_curve_coefficient[2];
+            // point.z = coefficients_left.values[2];
+
+            point.z = left_min_z;
+            marker.points.push_back(point);
+          }
+          marker_pub_.publish(marker);
+
+
+          marker.ns = "local_right_curb_marker";
+          marker.header.frame_id = cloud->header.frame_id;
+          marker.header.stamp = ros::Time();
+          marker.type = visualization_msgs::Marker::LINE_STRIP;
+          marker.action = visualization_msgs::Marker::ADD;
+          marker.scale.x = 0.05;
+          marker.color.a = 1.0;
+          marker.color.r = 0;
+          marker.color.g = 1;
+          marker.color.b = 0;
+          marker.frame_locked = true;
+          marker.points.clear();
+          marker.id = 1;
+          for (int i = -50; i < 75; i++)
+          {
+            geometry_msgs::Point point;
+            point.x = 0.2 * i;
+            point.y = (right_line_a0 + right_line_a1 * point.x);
+            // point.y=left_curve_coefficient[0]*std::pow(point.x,2)+left_curve_coefficient[1]*point.x+left_curve_coefficient[2];
+            // point.z = coefficients_left.values[2];
+
+            point.z = right_min_z;
+            marker.points.push_back(point);
+          }
+          marker_pub_.publish(marker);
+
+
+  /******************2016-9-21 line fit******************************************************************************/
+              /*********************2016-9-23 kalman tracking*********************************************************************************************/
+/*
+          Point2f left_p1, left_p2;
+          left_p1.x = -5;
+          left_p1.y = (left_line_a0 + left_line_a1 * left_p1.x);
+          left_p2.x = 15;
+          left_p2.y = (left_line_a0 + left_line_a1 * left_p2.x);
+
+          vector<Point2f> lLane, rLane, lSLane, rSlane;
+          */
+
+          std::vector<float> left_parameters;
+          std::vector<float> right_parameters;
+
+          if (first_flag_)
+          {
+            first_flag_ = false;
+            lkfs->InitPrediction(left_line_a0, left_line_a1, true);
+
+            lkfs->InitPrediction(right_line_a0,right_line_a1,true);
+            left_parameters = lkfs->getStateL();
+            right_parameters=lkfs->getStateR();
+          }
+          else
+          {
+            lkfs->set_Lane_Parameters(left_line_a0, left_line_a1, true);
+
+            lkfs->set_Lane_Parameters(right_line_a0,right_line_a1,false);
+            lkfs->predict(true);
+
+            left_parameters = lkfs->getStateL();
+
+            lkfs->predict(false);
+            right_parameters=lkfs->getStateR();
+          }
+          /*************************************************************************************/
+          vector<float> center_parameters(2);
+
+          if(!right_keeping_flag_sub_)
+          {
+            center_parameters[1] = left_parameters[1];
+            center_parameters[0] = left_parameters[0] - road_width_ / 2;
+          }
+          else
+          {
+            center_parameters[1] = right_parameters[1];
+            center_parameters[0] = right_parameters[0] + road_width_ / 2;
+          }
+          marker.ns = "kalman_left__marker";
+          marker.header.frame_id = cloud->header.frame_id;
+          marker.header.stamp = ros::Time();
+          marker.type = visualization_msgs::Marker::LINE_STRIP;
+          marker.action = visualization_msgs::Marker::ADD;
+          marker.scale.x = 0.05;
+          marker.color.a = 1.0;
+          marker.color.r = 1;
+          marker.color.g = 0;
+          marker.color.b = 0;
+          marker.frame_locked = true;
+          marker.points.clear();
+          marker.id = 2;
+          for (int i = 0; i < 75; i++)
+          {
+            geometry_msgs::Point point;
+            point.x = i * 0.2;
+            point.y = point.x * left_parameters[1] + left_parameters[0];
+            point.z = coefficients_left.values[2];
+            marker.points.push_back(point);
+          }
+          marker_pub_.publish(marker);
+          marker.ns = "kalman_center__marker";
+          marker.header.frame_id = cloud->header.frame_id;
+          marker.header.stamp = ros::Time();
+          marker.type = visualization_msgs::Marker::LINE_STRIP;
+          marker.action = visualization_msgs::Marker::ADD;
+          marker.scale.x = 0.05;
+          marker.color.a = 1.0;
+          marker.color.r = 1;
+          marker.color.g = 0;
+          marker.color.b = 0;
+          marker.frame_locked = true;
+          marker.points.clear();
+          marker.id = 3;
+
+          for (int i = 0; i < 75; i++)
+          {
+            geometry_msgs::Point point;
+            point.x = i * 0.2;
+            point.y = point.x * center_parameters[1] + center_parameters[0];
+            point.z = coefficients_left.values[2];
+            marker.points.push_back(point);
+          }
+
+          marker_pub_.publish(marker);
+
+
+          marker.ns = "kalman_right__marker";
+          marker.header.frame_id = cloud->header.frame_id;
+          marker.header.stamp = ros::Time();
+          marker.type = visualization_msgs::Marker::LINE_STRIP;
+          marker.action = visualization_msgs::Marker::ADD;
+          marker.scale.x = 0.05;
+          marker.color.a = 1.0;
+          marker.color.r = 1;
+          marker.color.g = 0;
+          marker.color.b = 0;
+          marker.frame_locked = true;
+          marker.points.clear();
+          marker.id = 4;
+          for (int i = 0; i < 75; i++)
+          {
+            geometry_msgs::Point point;
+            point.x = i * 0.2;
+            point.y = point.x * right_parameters[1] + right_parameters[0];
+            point.z = coefficients_right.values[2];
+            marker.points.push_back(point);
+          }
+          marker_pub_.publish(marker);
+
+          marker.ns = "kalman_center__marker";
+          marker.header.frame_id = cloud->header.frame_id;
+          marker.header.stamp = ros::Time();
+          marker.type = visualization_msgs::Marker::LINE_STRIP;
+          marker.action = visualization_msgs::Marker::ADD;
+          marker.scale.x = 0.05;
+          marker.color.a = 1.0;
+          marker.color.r = 1;
+          marker.color.g = 0;
+          marker.color.b = 0;
+          marker.frame_locked = true;
+          marker.points.clear();
+          marker.id = 5;
+
+          for (int i = 0; i < 75; i++)
+          {
+            geometry_msgs::Point point;
+            point.x = i * 0.2;
+            point.y = point.x * center_parameters[1] + center_parameters[0];
+            point.z = coefficients_left.values[2];
+            marker.points.push_back(point);
+          }
+
+          marker_pub_.publish(marker);
+
+/**********************2016-9-23 kalman tracking************************************************************************************/
+
+
+ /*****************************************************************************************************************/
+
+        sensor_msgs::PointCloud2::Ptr left_cloud_out(new sensor_msgs::PointCloud2);
+        pcl::toROSMsg(*left_curb_cloud, *left_cloud_out);
+
+        left_cloud_out->header.frame_id = cloud->header.frame_id;
+        left_cloud_out->header.stamp = cloud->header.stamp;
+        left_curb_pub_.publish(left_cloud_out);
+
+        sensor_msgs::PointCloud2::Ptr right_cloud_out(new sensor_msgs::PointCloud2);
+        pcl::toROSMsg(*right_curb_cloud, *right_cloud_out);
+
+        right_cloud_out->header.frame_id = cloud->header.frame_id;
+        right_cloud_out->header.stamp = cloud->header.stamp;
+        right_curb_pub_.publish(right_cloud_out);
+
+
+       //  curb_detection::CenterLine::Ptr center_line_infoPtr(new curb_detection::CenterLine);
+         lane_center_keeping::center_line_msg::Ptr center_line_infoPtr(new lane_center_keeping::center_line_msg);
+         center_line_infoPtr->header.stamp=ros::Time::now();
+         center_line_infoPtr->slope=center_parameters[1];
+
+
+        // center_line_infoPtr->intercept=-(center_parameters[1]*15+center_parameters[0]);
+         center_line_infoPtr->intercept=-(center_parameters[1]*anchor_position_+center_parameters[0]);
+         center_line_infoPtr->intercept_0=-(center_parameters[1]*0+center_parameters[0]);
+         center_line_infoPtr->intercept_1=-(center_parameters[1]*5+center_parameters[0]);
+
+
+         curb_info_pub_.publish(center_line_infoPtr);
+  }
+
+
+/************************************************************************/
+/*****************10-5 cityway******************************************************************/
+
+   void LaneCenterlineDetection::process_cityroad(const sensor_msgs::PointCloud2::ConstPtr&cloud)
+   {
+          ROS_INFO_STREAM_ONCE("CurbSegmentation::process_cityroad():Point cloud received");
+           if (right_curb_pub_.getNumSubscribers() == 0)
+           {
+               //return;
+           }
+           pcl::fromROSMsg(*cloud, pcl_in_);
+
+           // Retrieve the input point cloud
+           pcl::PointCloud<VPoint>::Ptr left_curb_cloud(new pcl::PointCloud<VPoint>);
+           pcl::PointCloud<VPoint>::Ptr right_curb_cloud(new pcl::PointCloud<VPoint>);
+           // Copy message header
+           left_curb_cloud->header.stamp = pcl_in_.header.stamp;
+           right_curb_cloud->header.stamp = pcl_in_.header.stamp;
+           // Target TF frame ID
+           if (params_.frame_id.empty())
+           {
+             // No TF transformation required
+             left_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+             right_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+           }
+           else
+           {
+             left_curb_cloud->header.frame_id = params_.frame_id;
+             right_curb_cloud->header.frame_id = params_.frame_id;
+           }
+           /*******************2016-9-20*********median filter*****************************************************************/
+
+           std::vector<std::vector<VPoint*> > rings(32);
+           for (pcl::PointCloud<VPoint>::iterator pt = pcl_in_.points.begin(); pt < pcl_in_.points.end(); pt++)
+           {
+             ROS_ASSERT(pt->ring < 32);
+             rings[pt->ring].push_back(&(*pt));
+           }
+
+           for (std::vector<std::vector<VPoint*> >::iterator ring = rings.begin(); ring < rings.end(); ring++)
+           {
+             if (ring->empty())
+             {
+               continue;
+             }
+             for (std::vector<VPoint*>::iterator pt = ring->begin() + 1; pt < ring->end() - 1; pt++)
+             {
+               VPoint*prev, *succ, *current;
+               prev = *(pt - 1);
+               current = (*pt);
+               succ = *(pt + 1);
+               (*pt)->x = median3(prev->x, (*pt)->x, succ->x);
+               (*pt)->y = median3(prev->y, (*pt)->y, succ->y);
+               (*pt)->z = median3(prev->z, (*pt)->z, succ->z);
+             }
+           }
+
+
+             //Retrieve the input point cloud
+             // Calculate the number of angular sampling bins
+             num_of_angular_rmap_bins_ = 360 / params_.ring_angular_res;
+             float angular_rmap_res = 360.0f / num_of_angular_rmap_bins_;
+             inv_angular_rmap_res_ = 1.0f / angular_rmap_res;
+
+             // Create and initialize the bins
+             int num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+             ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings);
+             for (size_t i = 0; i < ring_map_.size(); ++i)
+             {
+               ring_map_[i] = RingMapBin();
+             }
+             // Accumulate all input points into the polar maps
+             VCloud::iterator itEnd = pcl_in_.end();//ground_cloud->end();//itEnd=ground_cloud->end();
+             for (VCloud::iterator it = pcl_in_.begin(); it != itEnd; ++it) //it=ground_cloud->begin();it!=itEnd;++it
+             {
+               float x = it->x;
+               float y = it->y;
+               float z = it->z;
+
+               // Conversion to the polar coordinates
+               float ang, mag;
+               toPolarCoords(x, y, ang, mag);
+
+               // RING MAP
+               // Find the corresponding map bin
+               int ah, rh;
+               if (it->ring > max_ring_index_)
+               {
+                 max_ring_index_ = it->ring;
+                 num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+                 ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings, RingMapBin());
+               }
+               getRingMapIndex(ang, it->ring, ah, rh);
+               // Accumulate the value
+               RingMapBin &hbin = getRingMapBin(ah, rh);
+               Eigen::Vector3d p(x, y, z);
+               float rad = std::sqrt(x * x + y * y);
+               hbin.n += 1;
+               hbin.sum += p;
+               hbin.rad_sum += rad;
+               if (hbin.n == 1)
+               {
+                 hbin.rad_min = rad;
+               }
+               else
+               {
+                 hbin.rad_min = (rad < hbin.rad_avg) ? rad : hbin.rad_min;
+               }
+             }
+             tRingMap::iterator hitEnd = ring_map_.end();
+             for (tRingMap::iterator hit = ring_map_.begin(); hit != hitEnd; ++hit)
+             {
+               if (hit->n < 1)
+               //        if( hit->n < MIN_NUM_OF_SAMPLES )
+               {
+                 continue;
+               }
+               // Calculate the average position, ...
+               double inv_n = 1.0 / hit->n;
+               hit->avg = hit->sum * inv_n;
+               hit->rad_avg = hit->rad_sum * inv_n;
+             }
+
+           bool left_detected = false;
+           bool right_detected = false;
+           int previous_position=num_of_angular_rmap_bins_ /2;
+           int current_position = previous_position;
+
+           for (int rh = 4; rh < num_of_rings -12; ++rh)
+           {
+               int left_point_num = 0;
+               int right_point_num = 0;
+              for (int ah = current_position - 5; ah >= 5; ah--)
+              {
+                  double max_rad = std::numeric_limits<float>::min();
+                  double min_rad = std::numeric_limits<float>::max();
+                  double max_z = std::numeric_limits<float>::min();
+                  double min_z = std::numeric_limits<float>::max();
+
+                  for (int i = 0; i < 4; i++)
+                  {
+                     RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) - i, rh);
+                     if (hbin.n > 0)
+                     {
+                        max_rad = std::max(max_rad, hbin.rad_avg);
+                        min_rad = std::min(min_rad, hbin.rad_avg);
+                        max_z = std::max(max_z, hbin.avg[2]);
+                        min_z = std::min(min_z, hbin.avg[2]);
+                     }
+                  }
+                  if ((max_z - min_z) > 0.1&& (max_rad - min_rad > 0.05) && (max_rad - min_rad < 0.3)) //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+                  {
+                      RingMapBin&hbin = getRingMapBin(ah, rh);
+                      VPoint point;
+                      point.x = hbin.avg[0];
+                      point.y = hbin.avg[1];
+                      point.z = hbin.avg[2];
+                      point.ring = rh;
+                      if(std::abs(point.x)>2&&std::abs(point.y)>1.5)
+                      {
+
+                      right_curb_cloud->points.push_back(point);
+                      right_point_num = right_point_num + 1;
+                      right_detected = true;
+                      }
+                   }
+                   if (right_point_num > 5)
+                   {
+                       break;
+                   }
+                }
+                for (int ah = current_position - 5; ah < num_of_angular_rmap_bins_; ah++)
+                {
+                  double max_rad = std::numeric_limits<float>::min();
+                  double min_rad = std::numeric_limits<float>::max();
+                  double max_z = std::numeric_limits<float>::min();
+                  double min_z = std::numeric_limits<float>::max();
+                  for (int i = 0; i < 4; i++)
+                  {
+                     RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) + i, rh);
+                     if (hbin.n > 0)
+                     {
+                         max_rad = std::max(max_rad, hbin.rad_avg);
+                         min_rad = std::min(min_rad, hbin.rad_avg);
+                         max_z = std::max(max_z, hbin.avg[2]);
+                         min_z = std::min(min_z, hbin.avg[2]);
+                     }
+                   }
+                   if ((max_z - min_z) > 0.1 && (max_rad - min_rad > 0.05) && (max_rad - min_rad < 0.3))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+                   {
+                      RingMapBin&hbin = getRingMapBin(ah, rh);
+                      VPoint point;
+                      point.x = hbin.avg[0];
+                      point.y = hbin.avg[1];
+                      point.z = hbin.avg[2];
+                      point.ring = rh;
+                      if(std::abs(point.x)>2&&std::abs(point.y)>1.5)
+                      {
+                      left_curb_cloud->points.push_back(point);
+                      left_point_num = left_point_num + 1;
+                      left_detected = true;
+                      }
+                    }
+                    if (left_point_num > 5)
+                    {
+                        break;
+                    }
+                }
+
+               if(left_detected && right_detected)
+               {
+                    VPoint left_point = left_curb_cloud->points[left_curb_cloud->points.size()-left_point_num+1];
+                    VPoint right_point = right_curb_cloud->points[right_curb_cloud->points.size()-right_point_num+1];
+
+                    if(right_point.y - left_point.y > 3.5)
+                    {
+                      float center_x = (right_point.x + left_point.x) / 2;
+                      float center_y = (right_point.y + left_point.y) / 2;
+                      float ang, mag;
+                      int row_index, col_index;
+                      toPolarCoords(center_x, center_y, ang, mag);
+
+                      //getPolarMapIndex(ang, mag, row_index, col_index);
+                      getRingMapIndex(ang,rh,row_index,col_index);
+                      current_position = row_index + (row_index - previous_position);
+                      previous_position = row_index;
+                    }
+
+                  }
+              }
+           left_detected = false;
+           right_detected = false;
+           previous_position=num_of_angular_rmap_bins_ ;
+           current_position = previous_position;
+
+           for (int rh = 5; rh < num_of_rings -16; ++rh)
+           {
+             int left_point_num = 0;
+             int right_point_num = 0;
+             for (int ah=current_position;ah<(num_of_angular_rmap_bins_*3)/2;ah++)
+             {
+               double max_rad = std::numeric_limits<float>::min();
+               double min_rad = std::numeric_limits<float>::max();
+               double max_z = std::numeric_limits<float>::min();
+               double min_z = std::numeric_limits<float>::max();
+
+               for (int i = 0; i < 4; i++)
+               {
+                 RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) + i, rh);
+                 if (hbin.n > 0)
+                 {
+                   max_rad = std::max(max_rad, hbin.rad_avg);
+                   min_rad = std::min(min_rad, hbin.rad_avg);
+                   max_z = std::max(max_z, hbin.avg[2]);
+                   min_z = std::min(min_z, hbin.avg[2]);
+                 }
+               }
+               if ((max_z - min_z) > 0.1&&(max_z-min_z<0.3) && (max_rad - min_rad > 0.05) && (max_rad - min_rad < 0.3))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+               {
+                 RingMapBin&hbin = getRingMapBin(ah, rh);
+                 VPoint point;
+                 point.x = hbin.avg[0];
+                 point.y = hbin.avg[1];
+                 point.z = hbin.avg[2];
+                 point.ring = rh;
+                 if(std::abs(point.x)>2&&std::abs(point.y)>1.5)
+                 {
+                 right_curb_cloud->points.push_back(point);
+                 right_point_num = right_point_num + 1;
+                 right_detected = true;
+                 }
+               }
+               if (right_point_num > 5)
+               {
+                 break;
+               }
+             }
+
+             for (int ah = current_position; ah > num_of_angular_rmap_bins_/2; ah--)
+             {
+               double max_rad = std::numeric_limits<float>::min();
+               double min_rad = std::numeric_limits<float>::max();
+               double max_z = std::numeric_limits<float>::min();
+               double min_z = std::numeric_limits<float>::max();
+
+               for (int i = 0; i < 4; i++)
+               {
+                 RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_)-i, rh);
+                 if (hbin.n > 0)
+                 {
+                   max_rad = std::max(max_rad, hbin.rad_avg);
+                   min_rad = std::min(min_rad, hbin.rad_avg);
+                   max_z = std::max(max_z, hbin.avg[2]);
+                   min_z = std::min(min_z, hbin.avg[2]);
+                 }
+               }
+               if ((max_z - min_z) > 0.1 && (max_rad - min_rad > 0.05)&& (max_rad - min_rad < 0.3))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+               {
+                 RingMapBin&hbin = getRingMapBin(ah, rh);
+                 VPoint point;
+                 point.x = hbin.avg[0];
+                 point.y = hbin.avg[1];
+                 point.z = hbin.avg[2];
+                 point.ring = rh;
+                 if(std::abs(point.x)>2&&std::abs(point.y)>1.5)
+                 {
+                 left_curb_cloud->points.push_back(point);
+                 left_point_num = left_point_num + 1;
+                 left_detected = true;
+                 }
+               }
+               if (left_point_num > 5)
+               {
+                 break;
+               }
+             }
+         if(left_detected && right_detected)
+         {
+           VPoint left_point = left_curb_cloud->points[left_curb_cloud->points.size()-left_point_num+1];
+           VPoint right_point = right_curb_cloud->points[right_curb_cloud->points.size()-right_point_num+1];
+           if(right_point.y - left_point.y > 3.5)
+           {
+             float center_x = (right_point.x + left_point.x) / 2;
+             float center_y = (right_point.y + left_point.y) / 2;
+             float ang, mag;
+             int row_index, col_index;
+             toPolarCoords(center_x, center_y, ang, mag);
+             getPolarMapIndex(ang, mag, row_index, col_index);
+             current_position = row_index + (row_index - previous_position);
+             previous_position = row_index;
+           }
+         }
+     }
+
+
+/*******************2016-9-20*********curb feature points detection***************************************************************************/
+/******************2016-9-21*line fit***************************************************************************/
+
+  size_t num_left_cloud = left_curb_cloud->points.size();
+  size_t num_right_cloud = right_curb_cloud->points.size();
+
+  bool left_curb_exit = false;
+  bool right_curb_exit = false;
+
+  TCloudPtr cloud_left_p(new TCloud());
+  TCloudPtr cloud_right_p(new TCloud());
+
+  pcl::ModelCoefficients coefficients_right;
+  pcl::ModelCoefficients coefficients_left;
+
+  TCloudPtr tpcl(new TCloud());
+  pcl::copyPointCloud(*left_curb_cloud, *tpcl);
+  pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+
+  float left_line_a0, left_line_a1, left_min_z;
+  float right_line_a0, right_line_a1, right_min_z;
+  Eigen::Vector3f left_curve_coefficient;
+  Eigen::Vector3f right_curve_coefficient;
+  left_curb_exit = curbFilter(left_curb_cloud, *cloud_left_p, coefficients_left);
+  right_curb_exit = curbFilter(right_curb_cloud, *cloud_right_p, coefficients_right);
+  if (left_curb_exit)
+    {
+      line_fit(cloud_left_p, left_line_a0, left_line_a1, left_min_z);
+      //  left_line_a1=coefficients_left.values[4]/coefficients_left.values[3];
+      //  left_line_a0=coefficients_left.values[1]-left_line_a1*coefficients_left.values[0];
+    }
+    else
+    {
+      left_line_a0 = 0;
+      left_line_a1 = 0;
+    }
+
+    if (right_curb_exit)
+    {
+      line_fit(cloud_right_p, right_line_a0, right_line_a1, right_min_z);
+      // right_line_a1=coefficients_right.values[4]/coefficients_right.values[3];
+      // right_line_a0=coefficients_right.values[1]-right_line_a1*coefficients_right.values[0];
+    }
+    else
+    {
+      right_line_a0 = 0;
+      right_line_a1 = 0;
+    }
+
+
+/*************************************************************************************/
+
+
+      marker.ns = "local_left_curb_marker";
+      marker.header.frame_id = cloud->header.frame_id;
+      marker.header.stamp = ros::Time();
+      marker.type = visualization_msgs::Marker::LINE_STRIP;
+      marker.action = visualization_msgs::Marker::ADD;
+      marker.scale.x = 0.05;
+      marker.color.a = 1.0;
+      marker.color.r = 1;
+      marker.color.g = 0;
+      marker.color.b = 0;
+      marker.frame_locked = true;
+      marker.points.clear();
+      marker.id = 0;
+      for (int i = -50; i < 100; i++)
+      {
+        geometry_msgs::Point point;
+        point.x = 0.2 * i;
+        point.y = (left_line_a0 + left_line_a1 * point.x);
+        // point.y=left_curve_coefficient[0]*std::pow(point.x,2)+left_curve_coefficient[1]*point.x+left_curve_coefficient[2];
+        // point.z = coefficients_left.values[2];
+
+        point.z = left_min_z;
+        marker.points.push_back(point);
+      }
+      marker_pub_.publish(marker);
+
+        marker.ns = "local_right_curb_marker";
+        marker.header.frame_id = cloud->header.frame_id;
+        marker.header.stamp = ros::Time();
+        marker.type = visualization_msgs::Marker::LINE_STRIP;
+        marker.action = visualization_msgs::Marker::ADD;
+        marker.scale.x = 0.05;
+        marker.color.a = 1.0;
+        marker.color.r = 0;
+        marker.color.g = 0;
+        marker.color.b = 1;
+        marker.frame_locked = true;
+        marker.points.clear();
+        marker.id = 1;
+
+        for (int i = -50; i < 100; i++)
+        {
+          geometry_msgs::Point point;
+          point.x = 0.2 * i;
+          point.y = (right_line_a0 + right_line_a1 * point.x);
+          //point.y=right_curve_coefficient[0]*std::pow(point.x,2)+right_curve_coefficient[1]*point.x+right_curve_coefficient[2];
+          //point.z =coefficients_right.values[2] ;
+          point.z = right_min_z;
+          marker.points.push_back(point);
+        }
+        marker_pub_.publish(marker);
+
+
+           /******************2016-9-21 line fit******************************************************************************/
+         /*********************2016-9-23 kalman tracking*********************************************************************************************/
+              std::vector<float>left_parameters;
+              std::vector<float>right_parameters;
+
+              if(first_flag_)
+              {
+                first_flag_ = false;
+
+                lkfs->InitPrediction(left_line_a0,left_line_a1,true);
+
+                lkfs->InitPrediction(right_line_a0,right_line_a1,false);
+
+                left_parameters=lkfs->getStateL();
+
+                right_parameters=lkfs->getStateR();
+
+              }
+        else
+        {
+          lkfs->set_Lane_Parameters(left_line_a0,left_line_a1,true);
+
+          lkfs->set_Lane_Parameters(right_line_a0,right_line_a1,false);
+
+          lkfs->predict(true);
+
+          left_parameters=lkfs->getStateL();
+          lkfs->predict(false);
+
+          right_parameters=lkfs->getStateR();
+        }
+
+         /*************************************************************************************/
+
+           size_t left_size=cloud_left_p->points.size();
+           size_t right_size=cloud_right_p->points.size();
+           vector<float>center_parameters(2);
+
+           if(left_size>1.5*right_size)
+            {
+             center_parameters[1]= left_parameters[1];
+             center_parameters[0]=left_parameters[0]-road_width_/2;
+             //center_parameters[1]=(lSLane[0].y-lSLane[1].y)/(lSLane[0].x-lSLane[1].x);
+              //center_parameters[0]=lSLane[0].y-center_parameters[1]*lSLane[0].x-road_width_/2;
+            }
+            else if(right_size>2*left_size)
+            {
+              //center_parameters[1]=(rSlane[0].y-lSLane[1].y)/(rSlane[0].x-rSlane[1].x);
+              //center_parameters[0]=rSlane[0].y-center_parameters[1]*rSlane[0].x+road_width_/2;
+              center_parameters[1]= right_parameters[1];
+              center_parameters[0]=right_parameters[0]-road_width_/2;
+            }
+           else
+            {
+             //float y1=(lSLane[0].y+rSlane[0].y)/2;
+             //float y2=(lSLane[1].y+rSlane[1].y)/2;
+             //float x1=-5;
+             //float x2=15;
+             center_parameters[1]=(left_parameters[1]+right_parameters[1])/2;
+             center_parameters[0]=(left_parameters[0]+right_parameters[0])/2;
+             road_width_=std::abs(left_parameters[0]-right_parameters[0])/2;
+
+            // center_parameters[1]=(y2-y1)/(x2-x1);
+             //center_parameters[0]=y1-center_parameters[1]*x1;
+          //   road_width_=(std::abs(lSLane[0].y-rSlane[0].y)+std::abs(lSLane[1].y-rSlane[1].y))/2;
+            }
+
+                marker.ns = "kalman_left__marker";
+                marker.header.frame_id = cloud->header.frame_id;
+                marker.header.stamp = ros::Time();
+                marker.type = visualization_msgs::Marker::LINE_STRIP;
+                marker.action = visualization_msgs::Marker::ADD;
+                marker.scale.x = 0.05;
+                marker.color.a = 1.0;
+                marker.color.r = 0;
+                marker.color.g = 1;
+                marker.color.b = 0;
+                marker.frame_locked = true;
+                marker.points.clear();
+                marker.id = 3;
+
+
+               for (int i = 0; i < 100; i++)
+              {
+                geometry_msgs::Point point;
+                point.x = i * 0.2;
+                point.y = point.x * left_parameters[1] + left_parameters[0];
+                point.z = coefficients_left.values[2];
+                marker.points.push_back(point);
+              }
+              marker_pub_.publish(marker);
+
+              marker.ns = "kalman_right__marker";
+              marker.header.frame_id = cloud->header.frame_id;
+              marker.header.stamp = ros::Time();
+              marker.type = visualization_msgs::Marker::LINE_STRIP;
+              marker.action = visualization_msgs::Marker::ADD;
+              marker.scale.x = 0.05;
+              marker.color.a = 1.0;
+              marker.color.r = 0;
+              marker.color.g = 1;
+              marker.color.b = 0;
+              marker.frame_locked = true;
+              marker.points.clear();
+              marker.id = 4;
+
+                for(int i=0;i<100;i++)
+                {
+                    geometry_msgs::Point point;
+                    point.x=i*0.2;
+                    point.y=point.x*right_parameters[1]+right_parameters[0];
+                    point.z =  coefficients_right.values[2];
+                    marker.points.push_back(point);
+                 }
+                marker_pub_.publish(marker);
+
+
+
+/*******************************************************************************/
+    // pcl::PointCloud<pcl::PointXYZ>::Ptr road_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+   pcl::PointCloud<VPoint>::Ptr road_cloud(new VCloud);
+
+   for (size_t i = 0; i < pcl_in_.points.size();i++)
+   {
+      pcl::PointXYZ point;
+      point.x = pcl_in_.points[i].x;
+      point.y = pcl_in_.points[i].y;
+      point.z = pcl_in_.points[i].z;
+      if(point.x<=0)
+        continue;
+      if(point.z>0)
+        continue;
+         float right_y=point.x*right_parameters[1]+right_parameters[0];
+         float left_y=point.x*left_parameters[1]+left_parameters[0];
+         if(point.y<(left_y-0.1)&&point.y>(right_y+0.1))
+         {
+           road_cloud->points.push_back(pcl_in_.points[i]);
+         }
+   }
+
+/*********************************************************************************/
+
+
+ /********************************2016-10-24 obstacle extraction*******************************************/
+/*
+ std::vector<pcl::PointIndices>clusters;
+
+ std::vector<int>seed_queue;
+ for(int i=0;i<static_cast<int>(road_cloud->points.size());++i)
+ {
+   std::vector<int>seed_queue;
+   int sq_idx=0;
+   seed_queue.push_back(i);
+
+ }
+if(seed_queu.size()>=min_pts_per_cluster&&seed_queue.size()<=max_pts_per_cluster)
+{
+ pcl::PointIndices r;
+ r.indices.resize(seed_queue.size());
+ for(size_t j=0;j<seed_queue.size();++j)
+ {
+   r.indices[j]=seed_queue[j];
+ }
+ std::sort(r.indices.begin(),r.indices.end());
+ r.indices.erase(std::unique(r.indices.begin(),r.indices.end(),r.indices.end()));
+ r.header=cloud.header;
+ clusters.push_back((r));
+}
+*/
+              /*
+std::vector<pcl::PointCloud<VPoint> > rings_1(32);
+for(size_t i=0;i<32;i++)
+{
+ rings_1[i]=pcl::PointCloud<VPoint>();
+}
+
+pcl::PointCloud<VPoint>::Ptr obstacle_cloud(new pcl::PointCloud<VPoint>);
+
+for(size_t i=0;i<road_cloud->size();i++)
+{
+ rings_1[road_cloud->points[i].ring].points.push_back(road_cloud->points[i]);
+}
+
+for(size_t i=0;i<rings_1.size();i++)
+{
+   if (rings_1[i].empty())
+   {
+      continue;
+   }
+   else
+   {
+     std::vector<std::vector<int> > lines;
+     lines.resize(10);
+     std::vector<int> line;
+     line.push_back(0);
+     for (size_t j = 1; j < rings_1[i].size(); j++)
+     {
+        VPoint prev = rings_1[i].points[j - 1];
+        VPoint current = rings_1[i].points[j];
+
+        float prev_rad = std::sqrt(std::pow(prev.x, 2) + std::pow(prev.y, 2));
+        float current_rad = std::sqrt(std::pow(current.x, 2) + std::pow(current.y, 2));
+
+
+        float diff_rad = std::abs(prev_rad - current_rad);
+        float diff_z = std::abs(current.z - prev.z);
+        if (diff_rad < 0.05 && diff_z < 0.1)
+        {
+            line.push_back(j);
+            if(j==rings_1[i].size()-1)
+            {
+              lines.push_back(line);
+            }
+
+        }
+        else
+        {
+           lines.push_back(line);
+           line.clear();
+           std::vector<int>(line).swap(line);
+           line.push_back(j);
+        }
+
+          //obstacle_cloud->points.push_back(rings_1[i].points[j]);
+     }
+     for (size_t k = 0; k < lines.size(); k++)
+     {
+       std::cout<<"lines[k].size:"<<lines[k].size()<<std::endl;
+       if(lines[k].size() >20)
+       {
+         for (size_t n = 0; n < lines[k].size(); n++)
+         {
+              //std::cout << "4" << std::endl;
+              //std::cout << rings_1[i].points[lines[k][n]].x << std::endl;
+            obstacle_cloud->points.push_back(rings_1[i].points[lines[k][n]]);
+            //  printf("%d", obstacle_cloud->points.size());
+         }
+       }
+     }
+     lines.clear();
+     std::vector<std::vector<int> >(lines).swap(lines);
+  }
+}
+
+/*
+   std::vector<std::vector<VPoint*> > rings2(32);
+
+      std::vector<std::vector<VPoint*> > rings3(32);
+      size_t line_count=0;
+      pcl::PointCloud<VPoint>::Ptr obstacle_cloud(new pcl::PointCloud<VPoint>);
+
+      for (pcl::PointCloud<VPoint>::iterator pt = road_cloud->points.begin(); pt < road_cloud->points.end(); pt++)
+      {
+        ROS_ASSERT(pt->ring < 32);
+        rings2[pt->ring].push_back(&(*pt));
+      }
+
+
+        for (std::vector<std::vector<VPoint*> >::iterator ring = rings.begin(); ring < rings.end(); ring++)
+        {
+          if (ring->empty())
+          {
+            continue;
+          }
+
+          rings3[line_count].push_back(*(ring->begin()));
+
+          for (std::vector<VPoint*>::iterator pt = ring->begin() + 1; pt < ring->end() - 1; pt++)
+          {
+            VPoint*prev, *succ, *current;
+            prev = *(pt - 1);
+            current = (*pt);
+            succ = *(pt + 1);
+            float prev_rad=std::pow(prev->x,2)+std::pow(prev->y,2);
+            float current_rad=std::pow(current->x,2)+std::pow(current->y,2);
+
+
+            float diff_rad=prev_rad-current_rad;
+            float diff_z=prev->z-current->z;
+            if(diff_rad<0.05&&diff_z<0.1)
+            {
+              // rings3[line_count].push_back(current);
+            }
+            else
+            {
+              line_count=line_count+1;
+              //rings3[line_count].push_back(current);
+            }
+          }
+
+/*
+          for(size_t k=0;k<line_count;k++)
+          {
+            if(rings3[k].size()<20)
+            {
+              for(size_t j=0;j<rings3[k].size();j++)
+              {
+                obstacle_cloud->points.push_back(*rings3[k][j]);
+              }
+            }
+          }
+          */
+     //   }
+
+
+
+
+ /********************************2016-10-24 obstacle extraction**************************************************************************/
+
+
+/*********************************julei************2016-10-12*****************************************/
+
+//group points with certain distance to each other
+/*
+ std::vector<pcl::PointIndices>cluster_indices;
+
+ if(obstacle_cloud->size()>50)
+ {
+   pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+
+   tree->setInputCloud(obstacle_cloud);
+   pcl::EuclideanClusterExtraction<pcl::PointXYZ>ec;
+   ec.setClusterTolerance(1.5);
+   ec.setMinClusterSize(2);
+   ec.setSearchMethod(tree);
+   ec.setInputCloud(obstacle_cloud);
+   ec.extract(cluster_indices);
+   ROS_INFO("cluster size %d",cluster_indices.size());
+ }
+
+ sensor_msgs::PointCloud2 msg;
+ size_t obstacle_count=0;
+ for(std::vector<pcl::PointIndices>::const_iterator it=cluster_indices.begin();it!=cluster_indices.end();it++)
+ {
+
+   float min_z=std::numeric_limits<float>::max();
+   float max_z=std::numeric_limits<float>::min();
+   float min_x=std::numeric_limits<float>::max();
+   float max_x=std::numeric_limits<float>::min();
+   float min_y=std::numeric_limits<float>::max();
+   float max_y=std::numeric_limits<float>::min();
+   std::vector<float>sum(1);
+
+
+
+   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZ>);
+
+
+   for(std::vector<int>::const_iterator pit=it->indices.begin();pit!=it->indices.end();pit++)
+   {
+     pcl::PointXYZ point;
+     point=obstacle_cloud->points[*pit];
+     min_z=std::min(min_z,point.z);
+     min_x=std::min(min_x,point.x);
+     min_y=std::min(min_y,point.y);
+
+     max_z=std::max(max_z,point.z);
+     max_x=std::max(max_x,point.x);
+     max_y=std::max(max_y,point.y);
+     sum[0]=sum[0]+point.x;
+     sum[1]=sum[1]+point.y;
+     sum[2]=sum[2]+point.z;
+     cloud_cluster->points.push_back(point);
+
+   }
+
+   if(cloud_cluster->points.size()>5)
+   {
+     obstacle_count=obstacle_count+1;
+      size_t num_cluster_cloud=cloud_cluster->points.size();
+      sum[0]=sum[0]/num_cluster_cloud;
+      sum[1]=sum[1]/num_cluster_cloud;
+      sum[2]=sum[2]/num_cluster_cloud;
+
+
+      float diff_z=max_z-min_z;
+      float diff_x=max_x-min_x;
+      float diff_y=max_y-min_y;
+
+      float diff_width=std::max(diff_x,diff_y);
+     // if(sum[2]<0&&diff_z>0.5&&diff_z<2.3)
+   //   {
+       //  if(diff_width>0.2&&diff_width<1&&diff_z/diff_width>1.5)
+         //{
+              marker.ns = "people";
+              marker.header.frame_id = cloud->header.frame_id;
+              marker.header.stamp = ros::Time();
+              marker.type = visualization_msgs::Marker::SPHERE;
+              marker.action = visualization_msgs::Marker::ADD;
+              marker.pose.position.x=sum[0];
+              marker.pose.position.y=sum[1];
+              marker.pose.position.z=sum[2];
+              marker.pose.orientation.x=0.0;
+              marker.pose.orientation.y=0.0;
+              marker.pose.orientation.z=0.0;
+              marker.pose.orientation.w=1.0;
+              marker.scale.x =diff_x;
+              marker.scale.y=diff_y;
+              marker.scale.z=diff_z;
+              marker.color.a =1.0;
+              marker.color.r = 1;
+              marker.color.g = 0;
+              marker.color.b = 0;
+              marker.frame_locked = true;
+              marker.points.clear();
+              marker.id = 5*obstacle_count;
+              marker_pub_.publish(marker);
+ //        }
+   //   }
+
+
+    //msg.header=obstacle_cloud->header;
+     msg.header.frame_id = cloud->header.frame_id;
+     msg.header.stamp = cloud->header.stamp;
+
+     cloud_cluster->header=obstacle_cloud->header;
+     pcl::toROSMsg(*(cloud_cluster.get()),msg);
+     clusteredPub_.publish(msg);
+   }
+ }
+*/
+
+/*********************************julei************2016-10-12*****************************************/
+
+
+         /**********************2016-9-23 kalman tracking************************************************************************************/
+
+
+           /*****************************************************************************************************************/
+
+               sensor_msgs::PointCloud2::Ptr left_cloud_out(new sensor_msgs::PointCloud2);
+               sensor_msgs::PointCloud2::Ptr right_cloud_out(new sensor_msgs::PointCloud2);
+               sensor_msgs::PointCloud2::Ptr ground_cloud_out(new sensor_msgs::PointCloud2);
+               sensor_msgs::PointCloud2::Ptr obstacle_cloud_out(new sensor_msgs::PointCloud2);
+               pcl::toROSMsg(*left_curb_cloud, *left_cloud_out);
+               pcl::toROSMsg(*right_curb_cloud, *right_cloud_out); //cloud_right_p
+               pcl::toROSMsg(*road_cloud, *ground_cloud_out); //cloud_right_p
+
+            //   pcl::toROSMsg(*obstacle_cloud,*obstacle_cloud_out);
+
+               left_cloud_out->header.frame_id = cloud->header.frame_id;
+               left_cloud_out->header.stamp = cloud->header.stamp;
+
+               right_cloud_out->header.frame_id = cloud->header.frame_id;
+               right_cloud_out->header.stamp = cloud->header.stamp;
+
+               ground_cloud_out->header.frame_id = cloud->header.frame_id;
+               ground_cloud_out->header.stamp = cloud->header.stamp;
+
+               obstacle_cloud_out->header.frame_id=cloud->header.frame_id;
+               obstacle_cloud_out->header.stamp=cloud->header.stamp;
+         //      ROS_INFO_STREAM("ground_cloud_out: " << ground_cloud->points.size());
+               left_curb_pub_.publish(left_cloud_out);
+               right_curb_pub_.publish(right_cloud_out);
+               ground_pub_.publish(ground_cloud_out);
+       /*
+               curb_detection::CenterLine::Ptr center_line_infoPtr(new curb_detection::CenterLine);
+               center_line_infoPtr->header.stamp=ros::Time::now();
+               center_line_infoPtr->slope=center_parameters[1];
+               center_line_infoPtr->intercept=-(center_parameters[1]*15+center_parameters[0]);
+               curb_info_pub_.publish(center_line_infoPtr);
+               */
+     }
+/******************10-5-cityway****************************************************************/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+void LaneCenterlineDetection::process_freeway2(const sensor_msgs::PointCloud2::ConstPtr&cloud)
+   {
+       ROS_INFO_STREAM_ONCE("CurbSegmentation::process_freeway2():Point cloud received");
+        if (right_curb_pub_.getNumSubscribers() == 0)
+        {
+              //   return;
+        }
+        pcl::fromROSMsg(*cloud, pcl_in_);
+
+        // Retrieve the input point cloud
+        pcl::PointCloud<VPoint>::Ptr left_curb_cloud(new pcl::PointCloud<VPoint>);
+        pcl::PointCloud<VPoint>::Ptr right_curb_cloud(new pcl::PointCloud<VPoint>);
+        // Copy message header
+        left_curb_cloud->header.stamp = pcl_in_.header.stamp;
+        right_curb_cloud->header.stamp = pcl_in_.header.stamp;
+        // Target TF frame ID
+        if (params_.frame_id.empty())
+        {
+          // No TF transformation required
+          left_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+          right_curb_cloud->header.frame_id = pcl_in_.header.frame_id;
+        }
+        else
+        {
+          left_curb_cloud->header.frame_id = params_.frame_id;
+          right_curb_cloud->header.frame_id = params_.frame_id;
+        }
+        /*******************2016-9-20*********median filter*****************************************************************/
+        std::vector<std::vector<VPoint*> > rings(32);
+        for (pcl::PointCloud<VPoint>::iterator pt = pcl_in_.points.begin(); pt < pcl_in_.points.end(); pt++)
+        {
+          ROS_ASSERT(pt->ring < 32);
+          rings[pt->ring].push_back(&(*pt));
+        }
+
+        for (std::vector<std::vector<VPoint*> >::iterator ring = rings.begin(); ring < rings.end(); ring++)
+        {
+          if (ring->empty())
+          {
+            continue;
+          }
+          for (std::vector<VPoint*>::iterator pt = ring->begin() + 1; pt < ring->end() - 1; pt++)
+          {
+            VPoint*prev, *succ, *current;
+            prev = *(pt - 1);
+            current = (*pt);
+            succ = *(pt + 1);
+            (*pt)->x = median3(prev->x, (*pt)->x, succ->x);
+            (*pt)->y = median3(prev->y, (*pt)->y, succ->y);
+            (*pt)->z = median3(prev->z, (*pt)->z, succ->z);
+          }
+        }
+  /*******************2016-9-20*********median filter********************************************************/
+
+           /*******************2016-9-20*********curb feature points detection***************************************************************************/
+   /*
+            size_t cloud_num=pcl_in_.points.size();
+            for(size_t i=0;i<cloud_num;i++)
+            {
+            float x=pcl_in_.points[i].x;
+            float y=pcl_in_.points[i].y;
+            float z=pcl_in_.points[i].z;
+
+            pcl_in_.points[i].x=1.0009*x-0.0353*y-0.3*z-0.3933;
+            pcl_in_.points[i].y=0.0339*x+0.4161*y+4.1681*z+4.5226;
+            pcl_in_.points[i].z=0.0196*x-0.0723*y+0.9276*z+1.8099;
+            }
+            */
+           /**********************************************************************************/
+           /*************************10-4***************************************************/
+
+
+          VCloud::Ptr ground_cloud(new VCloud);
+
+          // Calculate the number of angular sampling bins
+          num_of_angular_bins_ = int(360 / params_.angular_res);
+          float angular_res = 360.0f / num_of_angular_bins_;
+          inv_angular_res_ = 1.0f / angular_res;
+
+          // Calculate the number of sampling bins along the polar axis
+          num_of_radial_bins_ = int(params_.max_range / params_.radial_res);
+          float radial_res = float(params_.max_range / num_of_radial_bins_);
+          inv_radial_res_ = 1.0f / radial_res;
+
+          // Create and initialize the map sampling bins
+          polar_map_.resize(num_of_angular_bins_ * num_of_radial_bins_);
+          polar_height_map_.resize(num_of_angular_bins_ * num_of_radial_bins_);
+
+          for (size_t i = 0; i < polar_map_.size(); ++i)
+          {
+            polar_map_[i] = PolarMapBin();
+          }
+
+          for (size_t i = 0; i < pcl_in_.points.size(); i++)
+          {
+
+            float x = pcl_in_.points[i].x;
+            float y = pcl_in_.points[i].y;
+            float z = pcl_in_.points[i].z;
+
+            float ang, mag;
+            toPolarCoords(x, y, ang, mag);
+            // Check the distance
+            if (mag > params_.max_range)
+              continue;
+            if (params_.min_range > 0.0 && mag < params_.min_range)
+              continue;
+
+            // Find the corresponding map bin
+            int an, rn;
+            getPolarMapIndex(ang, mag, an, rn);
+            size_t polar_map_index = rn * num_of_angular_bins_ + an;
+            polar_height_map_[polar_map_index].push_back(z);
+            // Accumulate the value
+            PolarMapBin &bin = getPolarMapBin(an, rn);
+            bin.n = bin.n + 1;
+            if (bin.n == 1)
+            {
+              bin.min_x = pcl_in_.points[i].x;
+              bin.min_y = pcl_in_.points[i].y;
+              bin.min_z = pcl_in_.points[i].z;
+
+              bin.max_x = pcl_in_.points[i].x;
+              bin.max_y = pcl_in_.points[i].y;
+              bin.max_z = pcl_in_.points[i].z;
+
+            }
+            else
+            {
+              bin.min_x = std::min(pcl_in_.points[i].x, bin.min_x);
+              bin.min_y = std::min(pcl_in_.points[i].y, bin.min_y);
+              bin.min_z = std::min(pcl_in_.points[i].z, bin.min_z);
+              bin.max_x = std::max(pcl_in_.points[i].x, bin.max_x);
+              bin.max_y = std::max(pcl_in_.points[i].y, bin.max_y);
+              bin.max_z = std::max(pcl_in_.points[i].z, bin.max_z);
+            }
+          }
+
+          for (size_t i = 0; i < polar_map_.size(); i++)
+          {
+            std::vector<float> temp = polar_height_map_[i];
+            if (polar_map_[i].min_z > params_.min_height_threshold)
+            {
+              continue;
+            }
+            else
+            {
+              std::sort(temp.begin(), temp.end());
+              for (size_t index = 1; index < temp.size(); index++)
+              {
+                float height_diff = temp[index] - temp[index - 1];
+                if (height_diff < params_.height_diff && (index != temp.size() - 1))
+                {
+                  continue;
+                }
+                else if (height_diff < params_.height_diff && (index == temp.size() - 1))
+                {
+                  polar_map_[i].vertice_z = temp[index];
+                  break;
+                }
+                else if (height_diff > params_.height_diff)
+                {
+                  polar_map_[i].vertice_z = temp[index - 1];
+                  break;
+                }
+              }
+
+            }
+          }
+          polar_height_map_.clear();
+
+          for (size_t i = 0; i < pcl_in_.points.size(); i++)
+          {
+
+            float x = pcl_in_.points[i].x;
+            float y = pcl_in_.points[i].y;
+            float z = pcl_in_.points[i].z;
+
+            float ang, mag;
+            toPolarCoords(x, y, ang, mag);
+            // Check the distance
+            if (mag > params_.max_range)
+              continue;
+            if (params_.min_range > 0.0 && mag < params_.min_range)
+              continue;
+            // Find the corresponding map bin
+            int an, rn;
+            getPolarMapIndex(ang, mag, an, rn);
+            // Accumulate the value
+            PolarMapBin &bin = getPolarMapBin(an, rn);
+            if (bin.n < 2)
+              continue;
+            if (bin.vertice_z != std::numeric_limits<float>::max())
+            {
+              float relative_diff = bin.vertice_z - bin.min_z;
+              if (z < bin.vertice_z )             //z<bin.vertice_z&&relative_diff<0.3
+              {
+                ground_cloud->points.push_back(pcl_in_.points[i]);
+              }
+            }
+          }
+/*
+
+          //Retrieve the input point cloud
+          // Calculate the number of angular sampling bins
+          num_of_angular_rmap_bins_ = 360 / params_.ring_angular_res;
+          float angular_rmap_res = 360.0f / num_of_angular_rmap_bins_;
+          inv_angular_rmap_res_ = 1.0f / angular_rmap_res;
+
+          // Create and initialize the bins
+          int num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+          ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings);
+          for (size_t i = 0; i < ring_map_.size(); ++i)
+          {
+            ring_map_[i] = RingMapBin();
+          }
+
+          // Accumulate all input points into the polar maps
+          VCloud::iterator itEnd = pcl_in_.end();//ground_cloud->end();//itEnd=ground_cloud->end();
+          for (VCloud::iterator it = pcl_in_.begin(); it != itEnd; ++it) //it=ground_cloud->begin();it!=itEnd;++it
+          {
+            float x = it->x;
+            float y = it->y;
+            float z = it->z;
+
+            // Conversion to the polar coordinates
+            float ang, mag;
+            toPolarCoords(x, y, ang, mag);
+
+            // RING MAP
+            // Find the corresponding map bin
+            int ah, rh;
+            if (it->ring > max_ring_index_)
+            {
+              max_ring_index_ = it->ring;
+              num_of_rings = max_ring_index_ - min_ring_index_ + 1;
+              ring_map_.resize(num_of_angular_rmap_bins_ * num_of_rings, RingMapBin());
+
+              ROS_INFO_STREAM("Ring map resized: " << num_of_rings);
+            }
+            getRingMapIndex(ang, it->ring, ah, rh);
+            // Accumulate the value
+            RingMapBin &hbin = getRingMapBin(ah, rh);
+            Eigen::Vector3d p(x, y, z);
+            float rad = std::sqrt(x * x + y * y);
+            hbin.n += 1;
+            hbin.sum += p;
+            hbin.rad_sum += rad;
+            if (hbin.n == 1)
+            {
+              hbin.rad_min = rad;
+            }
+            else
+            {
+              hbin.rad_min = (rad < hbin.rad_avg) ? rad : hbin.rad_min;
+            }
+          }
+
+          tRingMap::iterator hitEnd = ring_map_.end();
+          for (tRingMap::iterator hit = ring_map_.begin(); hit != hitEnd; ++hit)
+          {
+            if (hit->n < 1)
+            //        if( hit->n < MIN_NUM_OF_SAMPLES )
+            {
+              continue;
+            }
+            // Calculate the average position, ...
+            double inv_n = 1.0 / hit->n;
+            hit->avg = hit->sum * inv_n;
+            hit->rad_avg = hit->rad_sum * inv_n;
+          }
+
+        bool left_detected = false;
+        bool right_detected = false;
+        int previous_position=num_of_angular_rmap_bins_ /2;
+        int current_position = previous_position;
+
+        for (int rh = 1; rh < num_of_rings -11; ++rh)
+        {
+          int left_point_num = 0;
+          int right_point_num = 0;
+
+
+          for (int ah = current_position - 2; ah >= 2; ah--)
+          {
+            double max_rad = std::numeric_limits<float>::min();
+            double min_rad = std::numeric_limits<float>::max();
+            double max_z = std::numeric_limits<float>::min();
+            double min_z = std::numeric_limits<float>::max();
+
+            for (int i = 0; i < 3; i++)
+            {
+              RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) - i, rh);
+              if (hbin.n > 0)
+              {
+                max_rad = std::max(max_rad, hbin.rad_avg);
+                min_rad = std::min(min_rad, hbin.rad_avg);
+                max_z = std::max(max_z, hbin.avg[2]);
+                min_z = std::min(min_z, hbin.avg[2]);
+              }
+            }
+            if ((max_z - min_z) > 0.15 && (max_rad - min_rad > 0.05) && (max_rad - min_rad < 0.3))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+            {
+              RingMapBin&hbin = getRingMapBin(ah, rh);
+              VPoint point;
+              point.x = hbin.avg[0];
+              point.y = hbin.avg[1];
+              point.z = hbin.avg[2];
+              point.ring = rh;
+              right_curb_cloud->points.push_back(point);
+              right_point_num = right_point_num + 1;
+              right_detected = true;
+            }
+            if (right_point_num > 3)
+            {
+              break;
+            }
+          }
+
+          for (int ah = current_position - 2; ah < num_of_angular_rmap_bins_; ah++)
+          {
+            double max_rad = std::numeric_limits<float>::min();
+            double min_rad = std::numeric_limits<float>::max();
+            double max_z = std::numeric_limits<float>::min();
+            double min_z = std::numeric_limits<float>::max();
+
+            for (int i = 0; i < 5; i++)
+            {
+              RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) + i, rh);
+              if (hbin.n > 0)
+              {
+                max_rad = std::max(max_rad, hbin.rad_avg);
+                min_rad = std::min(min_rad, hbin.rad_avg);
+                max_z = std::max(max_z, hbin.avg[2]);
+                min_z = std::min(min_z, hbin.avg[2]);
+              }
+            }
+            if ((max_z - min_z) > 0.1 && (max_rad - min_rad > 0.1) && (max_rad - min_rad < 0.4))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+            {
+              RingMapBin&hbin = getRingMapBin(ah, rh);
+              VPoint point;
+              point.x = hbin.avg[0];
+              point.y = hbin.avg[1];
+              point.z = hbin.avg[2];
+              point.ring = rh;
+              left_curb_cloud->points.push_back(point);
+              left_point_num = left_point_num + 1;
+              left_detected = true;
+            }
+            if (left_point_num > 3)
+            {
+              left_point_num = 0;
+              break;
+            }
+          }
+
+        for (int ah = num_of_angular_rmap_bins_; ah > current_position; ah--)
+        {
+          double max_rad = std::numeric_limits<float>::min();
+          double min_rad = std::numeric_limits<float>::max();
+          double max_z = std::numeric_limits<float>::min();
+          double min_z = std::numeric_limits<float>::max();
+
+          for (int i = 0; i < 3; i++)
+          {
+            RingMapBin&hbin = getRingMapBin(((ah + num_of_angular_rmap_bins_) % num_of_angular_rmap_bins_) - i, rh);
+            if (hbin.n > 0)
+            {
+              max_rad = std::max(max_rad, hbin.rad_avg);
+              min_rad = std::min(min_rad, hbin.rad_avg);
+              max_z = std::max(max_z, hbin.avg[2]);
+              min_z = std::min(min_z, hbin.avg[2]);
+            }
+          }
+          if ((max_z - min_z) > 0.1 && (max_rad - min_rad > 0.1) && (max_rad - min_rad < 0.4))    //(max_rad - min_rad > 0.05)&&(max_rad-min_rad<0.4)&&
+          {
+            RingMapBin&hbin = getRingMapBin(ah, rh);
+            VPoint point;
+            point.x = hbin.avg[0];
+            point.y = hbin.avg[1];
+            point.z = hbin.avg[2];
+            point.ring = rh;
+            left_curb_cloud->points.push_back(point);
+            left_point_num = left_point_num + 1;
+            left_detected = true;
+
+          }
+          if (left_point_num > 3)
+          {
+            left_point_num = 0;
+            break;
+          }
+        }
+
+      if (left_detected && right_detected)
+      {
+        VPoint left_point = left_curb_cloud->points[left_curb_cloud->points.size() - 1];
+        VPoint right_point = right_curb_cloud->points[right_curb_cloud->points.size() - 1];
+        if ((right_point.y - left_point.y) > 3.5)
+        {
+          float center_x = (right_point.x + left_point.x) / 2;
+          float center_y = (right_point.y + left_point.y) / 2;
+          float ang, mag;
+          int row_index, col_index;
+          toPolarCoords(center_x, center_y, ang, mag);
+          getPolarMapIndex(ang, mag, row_index, col_index);
+          current_position = row_index + (row_index - previous_position);
+          previous_position = row_index;
+        }
+
+      }
+
+  }
+  */
+
+        /*******************2016-9-20*********curb feature points detection***************************************************************************/
+        /******************2016-9-21*line fit***************************************************************************/
+          /*
+
+        size_t num_left_cloud = left_curb_cloud->points.size();
+        size_t num_right_cloud = right_curb_cloud->points.size();
+
+        bool left_curb_exit = false;
+        bool right_curb_exit = false;
+
+        TCloudPtr cloud_left_p(new TCloud());
+        TCloudPtr cloud_right_p(new TCloud());
+
+
+        pcl::ModelCoefficients coefficients_right;
+        pcl::ModelCoefficients coefficients_left;
+
+          TCloudPtr tpcl(new TCloud());
+          pcl::copyPointCloud(*left_curb_cloud, *tpcl);
+          pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+
+          float left_line_a0, left_line_a1, left_min_z;
+          float right_line_a0, right_line_a1, right_min_z;
+          Eigen::Vector3f left_curve_coefficient;
+          Eigen::Vector3f right_curve_coefficient;
+          left_curb_exit=curbFilter(left_curb_cloud, *cloud_left_p, coefficients_left);
+          right_curb_exit=curbFilter(right_curb_cloud, *cloud_right_p, coefficients_right);
+          if(left_curb_exit)
+          {
+              line_fit(cloud_left_p, left_line_a0,left_line_a1 ,left_min_z);
+            //  left_line_a1=coefficients_left.values[4]/coefficients_left.values[3];
+            //  left_line_a0=coefficients_left.values[1]-left_line_a1*coefficients_left.values[0];
+          }
+          else
+          {
+              left_line_a0 = 0;
+              left_line_a1 = 0;
+           }
+
+           if(right_curb_exit)
+           {
+             line_fit(cloud_right_p, right_line_a0,right_line_a1 ,right_min_z);
+            // right_line_a1=coefficients_right.values[4]/coefficients_right.values[3];
+            // right_line_a0=coefficients_right.values[1]-right_line_a1*coefficients_right.values[0];
+           }
+           else
+           {
+             right_line_a0 = 0;
+             right_line_a1 = 0;
+           }
+
+*/
+      /*************************************************************************************/
+          /*
+
+           marker.ns = "local_left_curb_marker";
+           marker.header.frame_id = cloud->header.frame_id;
+           marker.header.stamp = ros::Time();
+           marker.type = visualization_msgs::Marker::LINE_STRIP;
+           marker.action = visualization_msgs::Marker::ADD;
+           marker.scale.x = 0.05;
+           marker.color.a = 1.0;
+           marker.color.r = 1;
+           marker.color.g = 0;
+           marker.color.b = 0;
+           marker.frame_locked = true;
+           marker.points.clear();
+           marker.id = 0;
+           for (int i = -50; i < 100; i++)
+           {
+             geometry_msgs::Point point;
+             point.x = 0.2 * i;
+             point.y = (left_line_a0 + left_line_a1 * point.x);
+            // point.y=left_curve_coefficient[0]*std::pow(point.x,2)+left_curve_coefficient[1]*point.x+left_curve_coefficient[2];
+            // point.z = coefficients_left.values[2];
+
+             point.z=left_min_z;
+             marker.points.push_back(point);
+           }
+           marker_pub_.publish(marker);
+
+           */
+/*
+          marker.ns = "local_right_curb_marker";
+          marker.header.frame_id = cloud->header.frame_id;
+          marker.header.stamp = ros::Time();
+          marker.type = visualization_msgs::Marker::LINE_STRIP;
+          marker.action = visualization_msgs::Marker::ADD;
+          marker.scale.x = 0.05;
+          marker.color.a = 1.0;
+          marker.color.r = 0;
+          marker.color.g = 0;
+          marker.color.b = 1;
+          marker.frame_locked = true;
+          marker.points.clear();
+          marker.id = 1;
+
+          for (int i = -50; i < 100; i++)
+          {
+            geometry_msgs::Point point;
+            point.x = 0.2 * i;
+            point.y = (right_line_a0 + right_line_a1 * point.x);
+            //point.y=right_curve_coefficient[0]*std::pow(point.x,2)+right_curve_coefficient[1]*point.x+right_curve_coefficient[2];
+            //point.z =coefficients_right.values[2] ;
+            point.z=right_min_z;
+            marker.points.push_back(point);
+          }
+          marker_pub_.publish(marker);
+
+*/
+        /******************2016-9-21 line fit******************************************************************************/
+      /*********************2016-9-23 kalman tracking*********************************************************************************************/
+/*
+            Point2f left_p1, left_p2;
+            left_p1.x = -5;
+            left_p1.y = (left_line_a0 + left_line_a1 * left_p1.x);
+            left_p2.x = 15;
+            left_p2.y = (left_line_a0 + left_line_a1 * left_p2.x);
+            Point2f right_p1, right_p2;
+            right_p1.x = -5;
+            right_p1.y = (right_line_a0 + right_line_a1 * right_p1.x);
+            right_p2.x = 15;
+            right_p2.y= (right_line_a0 + right_line_a1 * right_p2.x);
+            vector<Point2f> lLane, rLane, lSLane, rSlane;
+            */
+            /*
+            if (first_flag_)
+            {
+              first_flag_ = false;
+              lkf->setStateLaneL(left_p1, left_p2);
+              lkf->setStateLaneR(right_p1, right_p2);
+              lkf->next();
+             lSLane = lkf->getStateL();
+             rSlane = lkf->getStateR();
+            }
+            else
+            {
+             lkf->addLine(left_p1, left_p2,true);
+              lkf->addLine(right_p1, right_p2, false);
+            //  lkf->setMeas(left_p1,left_p2,true);
+            lkf->predict();
+            //  lkf->update(true);
+              lSLane = lkf->getStateL();
+
+             // lkf->setMeas(right_p1, right_p2, false);
+             // lkf->predict();
+             // lkf->update(false);
+              rSlane = lkf->getStateR();
+            }
+            */
+          /*
+           std::vector<float>left_parameters;
+           std::vector<float>right_parameters;
+
+            {
+           if(first_flag_)
+           {
+             first_flag_ = false;
+
+             lkfs->InitPrediction(left_line_a0,left_line_a1,true);
+
+             lkfs->InitPrediction(right_line_a0,right_line_a1,false);
+
+             left_parameters=lkfs->getStateL();
+
+             right_parameters=lkfs->getStateR();
+
+           }
+     else
+     {
+       lkfs->set_Lane_Parameters(left_line_a0,left_line_a1,true);
+
+       lkfs->set_Lane_Parameters(right_line_a0,right_line_a1,false);
+
+       lkfs->predict(true);
+
+       left_parameters=lkfs->getStateL();
+       lkfs->predict(false);
+
+       right_parameters=lkfs->getStateR();
+     }
+     */
+      /*************************************************************************************/
+/*
+        size_t left_size=cloud_left_p->points.size();
+        size_t right_size=cloud_right_p->points.size();
+        vector<float>center_parameters(2);
+
+        if(left_size>1.5*right_size)
+         {
+          center_parameters[1]= left_parameters[1];
+          center_parameters[0]=left_parameters[0]-road_width_/2;
+          //center_parameters[1]=(lSLane[0].y-lSLane[1].y)/(lSLane[0].x-lSLane[1].x);
+           //center_parameters
+            {[0]=lSLane[0].y-center_parameters[1]*lSLane[0].x-road_width_/2;
+         }
+         else if(right_size>2*left_size)
+         {
+           //center_parameters[1]=(rSlane[0].y-lSLane[1].y)/(rSlane[0].x-rSlane[1].x);
+           //center_parameters[0]=rSlane[0].y-center_parameters[1]*rSlane[0].x+road_width_/2;
+           center_parameters[1]= right_parameters[1];
+           center_parameters[0]=right_parameters[0]-road_width_/2;
+         }
+        else
+         {
+          //float y1=(lSLane[0].y+rSlane[0].y)/2;
+          //float y2=(lSLane[1].y+rSlane[1].y)/2;
+          //float x1=-5;
+          //float x2=15;
+          center_parameters[1]=(left_parameters[1]+right_parameters[1])/2;
+          center_parameters[0]=(left_parameters[0]+right_parameters[0])/2;
+          road_width_=std::abs(left_parameters[0]-right_parameters[0])/2;
+
+         // center_parameters[1]=(y2-y1)/(x2-x1);
+          //center_parameters[0]=y1-center_parameters[1]*x1;
+       //   road_width_=(std::abs(lSLane[0].y-rSlane[0].y)+std::abs(lSLane[1].y-rSlane[1].y))/2;
+         }
+
+             marker.ns = "kalman_left__marker";
+             marker.header.frame_id = cloud->header.frame_id;
+             marker.header.stamp = ros::Time();
+             marker.type = visualization_msgs::Marker::LINE_STRIP;
+             marker.action = visualization_msgs::Marker::ADD;
+             marker.scale.x = 0.05;
+             marker.color.a = 1.0;
+             marker.color.r = 0;
+             marker.color.g = 1;
+             marker.color.b = 0;
+             marker.frame_locked = true;
+             marker.points.clear();
+             marker.id = 3;
+           /*  for (int i = 0; i < 2; i++)
+             {
+               geometry_msgs::Point point;
+               point.y = lSLane[i].y;
+               point.x = lSLane[i].x;
+               point.z =  coefficients_left.values[2];
+               std::cout << "update data2:" << point.x << lSLane[i].y << std::endl;
+               marker.points.push_back(point);
+             }
+             */
+/*
+             for(int i=0;i<100;i++)
+             {
+               geometry_msgs::Point point;
+               point.x=i*0.2;
+               point.y=point.x*left_parameters[1]+left_parameters[0];
+               point.z =  coefficients_left.values[2];
+               marker.points.push_back(point);
+             }
+             marker_pub_.publish(marker);
+
+             marker.ns = "kalman_right__marker";
+             marker.header.frame_id = cloud->header.frame_id;
+             marker.header.stamp = ros::Time();
+             marker.type = visualization_msgs::Marker::LINE_STRIP;
+             marker.action = visualization_msgs::Marker::ADD;
+             marker.scale.x = 0.05;
+             marker.color.a = 1.0;
+             marker.color.r = 0;
+             marker.color.g = 1;
+             marker.color.b = 0;
+             marker.frame_locked = true;
+             marker.points.clear();
+             marker.id = 4;
+
+
+
+             for(int i=0;i<100;i++)
+             {
+                 geometry_msgs::Point point;
+                 point.x=i*0.2;
+                 point.y=point.x*right_parameters[1]+right_parameters[0];
+                 point.z =  coefficients_right.values[2];
+                 marker.points.push_back(point);
+              }
+             marker_pub_.publish(marker);
+
+
+             marker.ns = "kalman_center__marker";
+             marker.header.frame_id = cloud->header.frame_id;
+             marker.header.stamp = ros::Time();
+             marker.type = visualization_msgs::Marker::LINE_STRIP;
+             marker.action = visualization_msgs::Marker::ADD;
+             marker.scale.x = 0.05;
+             marker.color.a = 1.0;
+             marker.color.r = 1;
+             marker.color.g = 0;
+             marker.color.b = 0;
+             marker.frame_locked = true;
+             marker.points.clear();
+             marker.id = 5;
+
+            for (int i = 0; i < 100; i++)
+            {
+              geometry_msgs::Point point;
+              point.x = i * 0.2;
+              point.y = point.x * center_parameters[1] + center_parameters[0];
+              point.z = coefficients_right.values[2];
+              marker.points.push_back(point);
+            }
+            marker_pub_.publish(marker);
+
+      /**********************2016-9-23 kalman tracking************************************************************************************/
+
+
+        /*****************************************************************************************************************/
+
+            sensor_msgs::PointCloud2::Ptr left_cloud_out(new sensor_msgs::PointCloud2);
+            sensor_msgs::PointCloud2::Ptr right_cloud_out(new sensor_msgs::PointCloud2);
+            sensor_msgs::PointCloud2::Ptr ground_cloud_out(new sensor_msgs::PointCloud2);
+            pcl::toROSMsg(*left_curb_cloud, *left_cloud_out);
+            pcl::toROSMsg(*right_curb_cloud, *right_cloud_out); //cloud_right_p
+            pcl::toROSMsg(*ground_cloud, *ground_cloud_out); //cloud_right_p
+
+            left_cloud_out->header.frame_id = cloud->header.frame_id;
+            left_cloud_out->header.stamp = cloud->header.stamp;
+
+            right_cloud_out->header.frame_id = cloud->header.frame_id;
+            right_cloud_out->header.stamp = cloud->header.stamp;
+
+            ground_cloud_out->header.frame_id = cloud->header.frame_id;
+            ground_cloud_out->header.stamp = cloud->header.stamp;
+            //    ROS_INFO_STREAM("ground_points_count: " << ground_cloud->points.size())
+            left_curb_pub_.publish(left_cloud_out);
+            right_curb_pub_.publish(right_cloud_out);
+            ground_pub_.publish(ground_cloud_out);
+    /*
+            curb_detection::CenterLine::Ptr center_line_infoPtr(new curb_detection::CenterLine);
+            center_line_infoPtr->header.stamp=ros::Time::now();
+            center_line_infoPtr->slope=center_parameters[1];
+            center_line_infoPtr->intercept=-(center_parameters[1]*15+center_parameters[0]);
+            curb_info_pub_.publish(center_line_infoPtr);
+            */
+  }
+}
+

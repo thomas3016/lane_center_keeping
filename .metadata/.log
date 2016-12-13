@@ -1,0 +1,246 @@
+!SESSION 2016-10-30 19:40:12.676 -----------------------------------------------
+eclipse.buildId=M20120208-0800
+java.version=1.8.0_111
+java.vendor=Oracle Corporation
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=en_US
+Framework arguments:  -product org.eclipse.epp.package.cpp.product
+Command-line arguments:  -os linux -ws gtk -arch x86_64 -product org.eclipse.epp.package.cpp.product
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 19:48:48.082
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 19:48:48.083
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 19:48:48.083
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 19:50:06.766
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 19:50:06.766
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 19:50:06.766
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 19:51:02.951
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 19:51:02.951
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 19:51:02.953
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+!SESSION 2016-10-30 20:04:04.399 -----------------------------------------------
+eclipse.buildId=M20120208-0800
+java.version=1.8.0_111
+java.vendor=Oracle Corporation
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=en_US
+Framework arguments:  -product org.eclipse.epp.package.cpp.product
+Command-line arguments:  -data /home/linfeng/ws_peng/src/lane_center_keeping -os linux -ws gtk -arch x86_64 -product org.eclipse.epp.package.cpp.product
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 20:04:34.404
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 20:04:34.404
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 20:04:34.404
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 20:09:27.599
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 20:09:27.599
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 20:09:27.599
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 20:12:25.467
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 20:12:25.467
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 20:12:25.467
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+
+!ENTRY org.eclipse.cdt.core 1 0 2016-10-30 20:13:41.812
+!MESSAGE Indexed 'Project@build' (0 sources, 78 headers) in 2.09 sec: 2,377 declarations; 2,712 references; 0 unresolved inclusions; 0 syntax errors; 2 unresolved names (0.04%)
+!SESSION 2016-10-30 20:27:44.505 -----------------------------------------------
+eclipse.buildId=M20120208-0800
+java.version=1.8.0_111
+java.vendor=Oracle Corporation
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=en_US
+Framework arguments:  -product org.eclipse.epp.package.cpp.product
+Command-line arguments:  -os linux -ws gtk -arch x86_64 -product org.eclipse.epp.package.cpp.product
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 20:42:39.585
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 20:42:39.585
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 20:42:39.585
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+!SESSION 2016-10-30 23:01:30.878 -----------------------------------------------
+eclipse.buildId=4.6.1.M20160907-1200
+java.version=1.8.0_111
+java.vendor=Oracle Corporation
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=en_US
+Framework arguments:  -product org.eclipse.epp.package.java.product
+Command-line arguments:  -os linux -ws gtk -arch x86_64 -product org.eclipse.epp.package.java.product
+
+!ENTRY org.eclipse.ui 1 1 2016-10-30 23:02:03.186
+!MESSAGE Workbench migration started
+
+!ENTRY org.eclipse.ui 1 1 2016-10-30 23:02:06.269
+!MESSAGE Workbench migration finished
+
+!ENTRY org.eclipse.ui 2 2 2016-10-30 23:02:11.950
+!MESSAGE Perspective with name 'C/C++' and id 'org.eclipse.cdt.ui.CPerspective' has been made into a local copy
+
+!ENTRY org.eclipse.oomph.setup.core 2 0 2016-10-30 23:02:35.174
+!MESSAGE /home/linfeng/.eclipse/org.eclipse.oomph.setup/cache/http___www.eclipse.org_setups_setups.zip (No such file or directory)
+!STACK 0
+java.io.FileNotFoundException: /home/linfeng/.eclipse/org.eclipse.oomph.setup/cache/http___www.eclipse.org_setups_setups.zip (No such file or directory)
+	at java.io.FileInputStream.open0(Native Method)
+	at java.io.FileInputStream.open(FileInputStream.java:195)
+	at java.io.FileInputStream.<init>(FileInputStream.java:138)
+	at org.eclipse.emf.ecore.resource.impl.FileURIHandlerImpl.createInputStream(FileURIHandlerImpl.java:99)
+	at org.eclipse.emf.ecore.resource.impl.ExtensibleURIConverterImpl.createInputStream(ExtensibleURIConverterImpl.java:360)
+	at org.eclipse.oomph.setup.internal.core.util.ECFURIHandlerImpl.createInputStream(ECFURIHandlerImpl.java:754)
+	at org.eclipse.emf.ecore.resource.impl.ExtensibleURIConverterImpl.createInputStream(ExtensibleURIConverterImpl.java:360)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil.handleArchiveRedirection(SetupCoreUtil.java:394)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil.configureResourceSet(SetupCoreUtil.java:375)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil.createResourceSet(SetupCoreUtil.java:150)
+	at org.eclipse.oomph.setup.ui.recorder.RecorderManager.<clinit>(RecorderManager.java:119)
+	at org.eclipse.oomph.setup.ui.SetupUIPlugin.performStartup(SetupUIPlugin.java:194)
+	at org.eclipse.oomph.setup.ui.EarlyStartup.earlyStartup(EarlyStartup.java:22)
+	at org.eclipse.ui.internal.EarlyStartupRunnable.runEarlyStartup(EarlyStartupRunnable.java:77)
+	at org.eclipse.ui.internal.EarlyStartupRunnable.run(EarlyStartupRunnable.java:53)
+	at org.eclipse.core.runtime.SafeRunner.run(SafeRunner.java:42)
+	at org.eclipse.ui.internal.Workbench$55.run(Workbench.java:2829)
+	at org.eclipse.core.internal.jobs.Worker.run(Worker.java:55)
+
+!ENTRY org.eclipse.oomph.setup.core 2 0 2016-10-30 23:02:35.424
+!MESSAGE The Eclipse Git-hosted URI 'http://git.eclipse.org/c/oomph/org.eclipse.oomph.git/plain/setups/org.eclipse.setup' is blocked for direct access.
+Please open a Bugzilla to add it to an official Oomph catalog.
+For initial testing, use the file system local version of the resource.
+Alternatively, run the setup archiver application as follows:
+  /opt/eclipse/eclipse -application org.eclipse.oomph.setup.core.SetupArchiver -consoleLog -noSplash -uris http://git.eclipse.org/c/oomph/org.eclipse.oomph.git/plain/setups/org.eclipse.setup
+
+!ENTRY org.eclipse.oomph.base 2 0 2016-10-30 23:02:35.425
+!MESSAGE java.io.IOException: Eclipse Git access blocked: http://git.eclipse.org/c/oomph/org.eclipse.oomph.git/plain/setups/org.eclipse.setup
+!STACK 0
+org.eclipse.emf.ecore.resource.impl.ResourceSetImpl$1DiagnosticWrappedException: java.io.IOException: Eclipse Git access blocked: http://git.eclipse.org/c/oomph/org.eclipse.oomph.git/plain/setups/org.eclipse.setup
+	at org.eclipse.emf.ecore.resource.impl.ResourceSetImpl.handleDemandLoadException(ResourceSetImpl.java:319)
+	at org.eclipse.emf.ecore.resource.impl.ResourceSetImpl.demandLoadHelper(ResourceSetImpl.java:278)
+	at org.eclipse.emf.ecore.resource.impl.ResourceSetImpl$ResourceLocator.demandLoadHelper(ResourceSetImpl.java:804)
+	at org.eclipse.emf.ecore.resource.impl.ResourceSetImpl$MappedResourceLocator.getResource(ResourceSetImpl.java:1204)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil$1.getResource(SetupCoreUtil.java:317)
+	at org.eclipse.emf.ecore.resource.impl.ResourceSetImpl.getResource(ResourceSetImpl.java:352)
+	at org.eclipse.oomph.base.util.BaseUtil.loadResourceSafely(BaseUtil.java:86)
+	at org.eclipse.oomph.setup.internal.core.SetupContext.getInstallation(SetupContext.java:631)
+	at org.eclipse.oomph.setup.internal.core.SetupContext.create(SetupContext.java:252)
+	at org.eclipse.oomph.setup.internal.core.SetupTaskPerformer.createForIDE(SetupTaskPerformer.java:3655)
+	at org.eclipse.oomph.setup.ui.SetupUIPlugin.performStartup(SetupUIPlugin.java:564)
+	at org.eclipse.oomph.setup.ui.SetupUIPlugin.access$4(SetupUIPlugin.java:344)
+	at org.eclipse.oomph.setup.ui.SetupUIPlugin$1$1.run(SetupUIPlugin.java:241)
+	at org.eclipse.core.internal.jobs.Worker.run(Worker.java:55)
+Caused by: java.io.IOException: Eclipse Git access blocked: http://git.eclipse.org/c/oomph/org.eclipse.oomph.git/plain/setups/org.eclipse.setup
+	at org.eclipse.oomph.setup.internal.core.util.ECFURIHandlerImpl.createInputStream(ECFURIHandlerImpl.java:585)
+	at org.eclipse.emf.ecore.resource.impl.ExtensibleURIConverterImpl.createInputStream(ExtensibleURIConverterImpl.java:360)
+	at org.eclipse.emf.ecore.resource.impl.ResourceImpl.load(ResourceImpl.java:1269)
+	at org.eclipse.emf.ecore.resource.impl.ResourceSetImpl.demandLoad(ResourceSetImpl.java:259)
+	at org.eclipse.emf.ecore.resource.impl.ResourceSetImpl.demandLoadHelper(ResourceSetImpl.java:274)
+	... 12 more
+!SESSION 2016-10-30 23:07:03.778 -----------------------------------------------
+eclipse.buildId=4.6.1.M20160907-1200
+java.version=1.8.0_111
+java.vendor=Oracle Corporation
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=en_US
+Framework arguments:  -product org.eclipse.epp.package.java.product
+Command-line arguments:  -os linux -ws gtk -arch x86_64 -product org.eclipse.epp.package.java.product
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 23:08:03.799
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 23:08:03.799
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 23:08:03.799
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+
+!ENTRY org.eclipse.oomph.setup.core 2 0 2016-10-30 23:08:28.421
+!MESSAGE /home/linfeng/.eclipse/org.eclipse.oomph.setup/cache/http___www.eclipse.org_setups_setups.zip (No such file or directory)
+!STACK 0
+java.io.FileNotFoundException: /home/linfeng/.eclipse/org.eclipse.oomph.setup/cache/http___www.eclipse.org_setups_setups.zip (No such file or directory)
+	at java.io.FileInputStream.open0(Native Method)
+	at java.io.FileInputStream.open(FileInputStream.java:195)
+	at java.io.FileInputStream.<init>(FileInputStream.java:138)
+	at org.eclipse.emf.ecore.resource.impl.FileURIHandlerImpl.createInputStream(FileURIHandlerImpl.java:99)
+	at org.eclipse.emf.ecore.resource.impl.ExtensibleURIConverterImpl.createInputStream(ExtensibleURIConverterImpl.java:360)
+	at org.eclipse.oomph.setup.internal.core.util.ECFURIHandlerImpl.createInputStream(ECFURIHandlerImpl.java:754)
+	at org.eclipse.emf.ecore.resource.impl.ExtensibleURIConverterImpl.createInputStream(ExtensibleURIConverterImpl.java:360)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil.handleArchiveRedirection(SetupCoreUtil.java:394)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil.configureResourceSet(SetupCoreUtil.java:375)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil.createResourceSet(SetupCoreUtil.java:150)
+	at org.eclipse.oomph.setup.ui.recorder.RecorderManager.<clinit>(RecorderManager.java:119)
+	at org.eclipse.oomph.setup.ui.SetupUIPlugin.performStartup(SetupUIPlugin.java:194)
+	at org.eclipse.oomph.setup.ui.EarlyStartup.earlyStartup(EarlyStartup.java:22)
+	at org.eclipse.ui.internal.EarlyStartupRunnable.runEarlyStartup(EarlyStartupRunnable.java:77)
+	at org.eclipse.ui.internal.EarlyStartupRunnable.run(EarlyStartupRunnable.java:53)
+	at org.eclipse.core.runtime.SafeRunner.run(SafeRunner.java:42)
+	at org.eclipse.ui.internal.Workbench$55.run(Workbench.java:2829)
+	at org.eclipse.core.internal.jobs.Worker.run(Worker.java:55)
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 23:09:27.285
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 23:09:27.285
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 23:09:27.285
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 23:12:09.266
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 23:12:09.266
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 23:12:09.266
+!MESSAGE /home/linfeng/ws_peng/src/lane_center_keeping overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+
+!ENTRY org.eclipse.core.resources 4 77 2016-10-30 23:14:15.150
+!MESSAGE Invalid project description.
+!SUBENTRY 1 unknown 0 0 2016-10-30 23:14:15.152
+!MESSAGE OK
+!SUBENTRY 1 org.eclipse.core.resources 4 77 2016-10-30 23:14:15.152
+!MESSAGE /home/linfeng/ws_peng overlaps the workspace location: /home/linfeng/ws_peng/src/lane_center_keeping
+!SESSION 2016-10-30 23:14:46.710 -----------------------------------------------
+eclipse.buildId=4.6.1.M20160907-1200
+java.version=1.8.0_111
+java.vendor=Oracle Corporation
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=en_US
+Framework arguments:  -product org.eclipse.epp.package.java.product
+Command-line arguments:  -os linux -ws gtk -arch x86_64 -product org.eclipse.epp.package.java.product
+
+!ENTRY org.eclipse.ui.workbench 4 2 2016-10-31 00:08:15.195
+!MESSAGE Problems occurred when invoking code from plug-in: "org.eclipse.ui.workbench".
+!STACK 0
+java.lang.ExceptionInInitializerError
+	at org.eclipse.oomph.setup.ui.SetupUIPlugin.performStartup(SetupUIPlugin.java:194)
+	at org.eclipse.oomph.setup.ui.EarlyStartup.earlyStartup(EarlyStartup.java:22)
+	at org.eclipse.ui.internal.EarlyStartupRunnable.runEarlyStartup(EarlyStartupRunnable.java:77)
+	at org.eclipse.ui.internal.EarlyStartupRunnable.run(EarlyStartupRunnable.java:53)
+	at org.eclipse.core.runtime.SafeRunner.run(SafeRunner.java:42)
+	at org.eclipse.ui.internal.Workbench$55.run(Workbench.java:2829)
+	at org.eclipse.core.internal.jobs.Worker.run(Worker.java:55)
+Caused by: java.lang.NullPointerException
+	at org.eclipse.core.internal.runtime.InternalPlatform.getLog(InternalPlatform.java:349)
+	at org.eclipse.core.runtime.Plugin.getLog(Plugin.java:267)
+	at org.eclipse.oomph.util.OomphPlugin.getLog(OomphPlugin.java:210)
+	at org.eclipse.oomph.util.OomphPlugin.log(OomphPlugin.java:225)
+	at org.eclipse.oomph.util.OomphPlugin.log(OomphPlugin.java:230)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil.handleArchiveRedirection(SetupCoreUtil.java:419)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil.configureResourceSet(SetupCoreUtil.java:375)
+	at org.eclipse.oomph.setup.internal.core.util.SetupCoreUtil.createResourceSet(SetupCoreUtil.java:150)
+	at org.eclipse.oomph.setup.ui.recorder.RecorderManager.<clinit>(RecorderManager.java:119)
+	... 7 more
+
+!ENTRY org.eclipse.core.jobs 4 2 2016-10-31 00:08:15.200
+!MESSAGE An internal error occurred during: "Workbench early startup".
+!STACK 0
+java.lang.NullPointerException
+	at org.eclipse.core.internal.runtime.InternalPlatform.getLog(InternalPlatform.java:349)
+	at org.eclipse.core.runtime.Plugin.getLog(Plugin.java:267)
+	at org.eclipse.ui.internal.WorkbenchPlugin.log(WorkbenchPlugin.java:773)
+	at org.eclipse.ui.internal.EarlyStartupRunnable.handleException(EarlyStartupRunnable.java:69)
+	at org.eclipse.core.runtime.SafeRunner.handleException(SafeRunner.java:75)
+	at org.eclipse.core.runtime.SafeRunner.run(SafeRunner.java:46)
+	at org.eclipse.ui.internal.Workbench$55.run(Workbench.java:2829)
+	at org.eclipse.core.internal.jobs.Worker.run(Worker.java:55)

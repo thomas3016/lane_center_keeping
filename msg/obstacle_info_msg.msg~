@@ -1,0 +1,3 @@
+uint32 obstacle_property
+geometry_msgs/Point position
+

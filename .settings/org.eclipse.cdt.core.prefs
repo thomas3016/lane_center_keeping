@@ -1,0 +1,15 @@
+eclipse.preferences.version=1
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/PATH/delimiter=\:
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/PATH/operation=replace
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/PATH/value=/opt/ros/indigo/share/euslisp/jskeus/eus//Linux64/bin\:/opt/ros/indigo/bin\:/opt/ros/indigo/share/euslisp/jskeus/eus//Linux64/bin\:/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/usr/games\:/usr/local/games
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/PYTHONPATH/delimiter=\:
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/PYTHONPATH/operation=replace
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/PYTHONPATH/value=/home/linfeng/ws_peng/devel/lib/python2.7/dist-packages\:/opt/ros/indigo/lib/python2.7/dist-packages
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/ROS_PACKAGE_PATH/delimiter=\:
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/ROS_PACKAGE_PATH/operation=append
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/ROS_PACKAGE_PATH/value=/home/linfeng/ws_peng/src\:/opt/ros/indigo/share\:/opt/ros/indigo/stacks
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/ROS_ROOT/delimiter=\:
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/ROS_ROOT/operation=replace
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/ROS_ROOT/value=/opt/ros/indigo/share/ros
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/append=true
+environment/project/cdt.managedbuild.toolchain.gnu.base.2138121640/appendContributed=false
